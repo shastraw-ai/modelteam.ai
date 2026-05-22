@@ -1,7 +1,6 @@
 import argparse
 import configparser
 import datetime
-import gc
 import gzip
 import json
 import os
@@ -9,24 +8,22 @@ import random
 import re
 import sys
 
-import torch
 from tabulate import tabulate
 from tqdm import tqdm
 
-from modelteam_utils.ai_utils import eval_llm_batch_with_scores, get_model_list, init_model
+from modelteam_utils.ai_utils import check_ollama_ready, init_ollama, extract_skills_from_snippet
 from modelteam_utils.constants import (ADDED, DELETED, TIME_SERIES, LANGS, LIBS, COMMITS, START_TIME, END_TIME,
                                        MIN_LINES_ADDED, SIGNIFICANT_CONTRIBUTION, REFORMAT_CHAR_LIMIT,
                                        TOO_BIG_TO_ANALYZE_LIMIT, TOO_BIG_TO_ANALYZE,
                                        SIGNIFICANT_CONTRIBUTION_LINE_LIMIT, MAX_DIFF_SIZE, STATS, USER, REPO, REPO_PATH,
-                                       SCORES, SIG_CODE_SNIPPETS, SKILLS, FILE, IMPORTS, T5_CHUNK_CHAR_LIMIT, VERSION,
-                                       PROFILES, PHC, TIMESTAMP, TEAM, SKILL_PREDICTION_LIMIT,
-                                       LIFE_OF_PY_PREDICTION_LIMIT, C2S, LIFE_OF_PY, MODEL_TYPES, I2S, SS_LC)
+                                       SIG_CODE_SNIPPETS, SKILLS, FILE, IMPORTS, CHUNK_CHAR_LIMIT, VERSION,
+                                       PROFILES, PHC, TIMESTAMP, TEAM, C2S, SS_LC)
 from modelteam_utils.constants import MT_PROFILE_JSON, PDF_STATS_JSON
 from modelteam_utils.crypto_utils import generate_hc
 from modelteam_utils.utils import break_code_snippets_to_chunks, filter_skills, yyyy_mm_to_quarter
 from modelteam_utils.utils import consistent_hash_code
 from modelteam_utils.utils import get_file_extension, run_commandline_command, timestamp_to_yyyy_mm, \
-    get_num_chars_changed, get_language_parser, normalize_docstring
+    get_num_chars_changed, get_language_parser
 from modelteam_utils.utils import sha256_hash, anonymize, load_repo_user_list, get_repo_user_key
 
 TRAIN_FLAG = False
@@ -36,8 +33,6 @@ THREE_MONTH = 3 * 30 * 24 * 60 * 60
 
 args = None
 debug = False
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 TMP_MAX_YYYY_MM = "tmp_max_yyyy_mm"
 
@@ -383,50 +378,24 @@ class ModelTeamGitParser:
                     for user in user_profiles:
                         self.write_user_profile_to_file(f, repo_name, repo_path, user, user_profiles[user])
         if not args.skip_model_eval and os.path.exists(user_stats_output_file_name):
-            skill_min_score = float(self.config['modelteam.ai']['skill_min_score'])
-            lop_min_score = float(self.config['modelteam.ai']['lop_min_score'])
-            min_scores = {C2S: skill_min_score, LIFE_OF_PY: lop_min_score, I2S: skill_min_score}
+            skill_min_snippet_count = int(self.config['modelteam.ai'].get('skill_min_snippet_count', '2'))
             if not os.path.exists(final_output):
-                # if not repo_level_data[LIBS]:
-                #     self.load_library_data(repo_lib_output_file_name, repo_level_data)
-                # for file in repo_level_data[LIBS].keys():
-                #     file_extension = get_file_extension(file)
-                #     parser = get_language_parser(file_extension, "", file, self.keep_only_public_libraries)
-                #     if not parser:
-                #         repo_level_data[LIBS][file] = ""
-                #         continue
-                #     lib_list = repo_level_data[LIBS][file]
-                #     libs_in_file = ""
-                #     for imp in lib_list:
-                #         imp = imp.strip()
-                #         libs_in_file += parser.get_import_prefix() + imp + "\n"
-                #     repo_level_data[LIBS][file] = libs_in_file
-                # when starting from tmp, we need to get repo details from the jsonl file
                 if not user_profiles:
                     with open(user_stats_output_file_name, "r") as f:
                         for line in f:
                             user_stats = json.loads(line)
-                            # Same repo for all users
                             repo_name = user_stats[REPO]
                             repo_path = user_stats[REPO_PATH]
                             if USER in user_stats and self.is_allowed_user(repo_name, user_stats[USER]):
                                 user_profiles[user_stats[USER]] = user_stats[STATS]
-                has_new_data = 0
-                for model_type in MODEL_TYPES:
-                    models = get_model_list(self.config, model_type)
-                    for model_path in models:
-                        # Evaluate 1 model at a time to avoid memory issues
-                        model_data = init_model(model_path, model_type, self.config, device)
-                        if model_type == C2S:
-                            model_label = f"Skill Prediction@{repo_name}"
-                        elif model_type == LIFE_OF_PY:
-                            model_label = f"Code Quality@{repo_name}"
-                        else:
-                            continue
-                        has_new_data += self.extract_skills(user_profiles, repo_level_data, min_months,
-                                                            model_data, repo_name, model_label)
-                        del model_data
-                        gc.collect()
+                if not check_ollama_ready(self.config):
+                    print("ERROR: Ollama is not running or model not available.", flush=True)
+                    print("Please install Ollama (https://ollama.com) and pull the configured model.", flush=True)
+                    return
+                model_data = init_ollama(self.config)
+                model_label = f"Skill Prediction@{repo_name}"
+                has_new_data = self.extract_skills(user_profiles, repo_level_data, min_months,
+                                                    model_data, repo_name, model_label)
                 if has_new_data == 0:
                     print(f"No users with extracted skills found for {repo_path}", flush=True)
                     return
@@ -439,7 +408,6 @@ class ModelTeamGitParser:
                 else:
                     remote_repo_path = None
                 if not args.keep_repo_name:
-                    # This hash is used to dedupe skill profiles in backend merger
                     if remote_repo_path:
                         repo_path = sha256_hash(remote_repo_path)
                     else:
@@ -450,7 +418,7 @@ class ModelTeamGitParser:
                         user_profile = user_profiles[user]
                         if TMP_MAX_YYYY_MM in user_profile and user_profile[TMP_MAX_YYYY_MM] >= min_months:
                             self.filter_non_public_data(user_profile)
-                            filter_skills(user_profile, min_scores)
+                            filter_skills(user_profile, skill_min_snippet_count)
                             self.write_user_profile_to_file(fo, repo_name, repo_path, user, user_profile)
 
     def write_user_profile_to_file(self, f, repo_name, repo_path, user, user_profile):
@@ -464,7 +432,6 @@ class ModelTeamGitParser:
         f.write("}\n")
 
     def extract_skills(self, user_profiles, repo_level_data, min_months, model_data, repo_name, model_label):
-        global label_file_list
         has_features = 0
         features = []
         pbar = None
@@ -498,10 +465,6 @@ class ModelTeamGitParser:
                     for i in range(len(monthly_snippets)):
                         snippets = monthly_snippets[i]
                         file_name = snippets[0]
-                        key = get_repo_user_key(repo_name, file_name)
-                        is_labeled_file = 0
-                        if key in label_file_list:
-                            is_labeled_file = 1
                         snippet_list = snippets[1]
                         for snippet in snippet_list:
                             file_extension = get_file_extension(file_name)
@@ -509,18 +472,12 @@ class ModelTeamGitParser:
                                                          self.keep_only_public_libraries)
                             if not parser:
                                 continue
-                            chunks = break_code_snippets_to_chunks(file_name, snippet, T5_CHUNK_CHAR_LIMIT)
+                            chunks = break_code_snippets_to_chunks(file_name, snippet, CHUNK_CHAR_LIMIT)
                             for chunk in chunks:
                                 lines = chunk.split("\n")
                                 line_count = len(lines)
-                                doc_string_line_count = self.get_docstring_line_count(lines, parser)
-                                libs_in_file = ""
-                                # if file_name in repo_level_data[LIBS]:
-                                #     libs_in_file = repo_level_data[LIBS][file_name]
                                 features.append({"user": user, "lang": lang, "file_name": file_name, "yyyy_mm": yyyy_mm,
-                                                 "snippet": chunk, "libs": libs_in_file, "line_count": line_count,
-                                                 "is_labeled_file": is_labeled_file,
-                                                 "doc_string_line_count": doc_string_line_count})
+                                                 "snippet": chunk, "line_count": line_count})
                                 if len(features) == args.batch_size:
                                     self.eval_llm_model(model_data, features, user_profiles, pbar)
                                     has_features += len(features)
@@ -535,42 +492,17 @@ class ModelTeamGitParser:
             pbar.close()
         return has_features
 
-    @staticmethod
-    def get_docstring_line_count(lines, parser):
-        docstrings = parser.extract_documentation(lines)
-        docstring_line_count = 0
-        if docstrings:
-            for docstring in docstrings:
-                norm_docstrings = normalize_docstring(docstring)
-                if norm_docstrings:
-                    docstring_line_count += len(norm_docstrings)
-        return docstring_line_count
-
     def eval_llm_model(self, model_data, features, user_profiles, pbar):
-        # print(f"Evaluating {len(features)} snippets for {model_data['model_tag']}", flush=True)
-        snippet_key = "snippet"
-        if model_data['model_type'] == I2S:
-            snippet_key = "libs"
-        snippets = [feature[snippet_key] for feature in features]
-        if model_data['model_type'] == LIFE_OF_PY:
-            limit = LIFE_OF_PY_PREDICTION_LIMIT
-        else:
-            limit = SKILL_PREDICTION_LIMIT
-        skill_list, score_list, sm_score_list = eval_llm_batch_with_scores(model_data['tokenizer'], device,
-                                                                           model_data['model'], snippets,
-                                                                           model_data['new_tokens'], limit)
         for i in range(len(features)):
+            snippet = features[i]["snippet"]
+            skills = extract_skills_from_snippet(model_data, snippet)
             lang = features[i]["lang"]
             yyyy_mm = features[i]["yyyy_mm"]
             line_count = features[i]["line_count"]
-            doc_string_line_count = features[i]["doc_string_line_count"]
-            is_labeled_file = features[i]["is_labeled_file"]
             if pbar:
                 pbar.update(line_count)
-            ModelTeamGitParser.accumulate_score(user_profiles[features[i]["user"]], lang, yyyy_mm, score_list[i],
-                                                sm_score_list[i], skill_list[i], line_count, doc_string_line_count,
-                                                model_data['model_tag'], model_data['model_type'] == C2S,
-                                                is_labeled_file)
+            ModelTeamGitParser.accumulate_score(user_profiles[features[i]["user"]], lang, yyyy_mm,
+                                                skills, line_count, model_data['model_tag'])
 
     @staticmethod
     def filter_non_public_data(user_profile):
@@ -586,64 +518,18 @@ class ModelTeamGitParser:
                 del lang_stats[lang][LIBS]
 
     @staticmethod
-    def accumulate_score(user_profile, lang, yyyy_mm, scores, sm_scores, skills, code_len, doc_string_len, tag, is_c2s,
-                         is_labeled_file):
-        for i in range(len(skills)):
-            s = skills[i]
-            score = scores[i]
-            sm_score = sm_scores[i]
-            if is_c2s:
-                if s not in user_profile[SKILLS]:
-                    user_profile[SKILLS][s] = 0
-                user_profile[SKILLS][s] += code_len
+    def accumulate_score(user_profile, lang, yyyy_mm, skills, code_len, tag):
+        for s in skills:
+            if s not in user_profile[SKILLS]:
+                user_profile[SKILLS][s] = 0
+            user_profile[SKILLS][s] += code_len
             if tag not in user_profile[LANGS][lang][TIME_SERIES][yyyy_mm]:
                 user_profile[LANGS][lang][TIME_SERIES][yyyy_mm][tag] = {}
             if s not in user_profile[LANGS][lang][TIME_SERIES][yyyy_mm][tag]:
-                # min, max, sum, count, code_line_count, doc_string_line_count, is_labeled_file
-                user_profile[LANGS][lang][TIME_SERIES][yyyy_mm][tag][s] = [score, score, 0, sm_score, sm_score, 0, 0, 0,
-                                                                           0, 0]
-            skill_map = user_profile[LANGS][lang][TIME_SERIES][yyyy_mm][tag][s]
-            skill_map[0] = max(skill_map[0], score)
-            skill_map[1] = min(skill_map[1], score)
-            skill_map[2] += score
-            skill_map[3] = max(skill_map[3], sm_score)
-            skill_map[4] = min(skill_map[4], sm_score)
-            skill_map[5] += sm_score
-            skill_map[6] += 1
-            skill_map[7] += code_len
-            skill_map[8] += doc_string_len
-            skill_map[9] = max(skill_map[9], is_labeled_file)
-
-    @staticmethod
-    def add_to_skills(skill_stats, monthly_skills_and_scores, model_path, score_type):
-        model_name = f"{model_path}::{score_type}"
-        for month in monthly_skills_and_scores:
-            skills = monthly_skills_and_scores[month].keys()
-            for skill in skills:
-                if model_name not in skill_stats:
-                    skill_stats[model_name] = {}
-                if skill not in skill_stats[model_name]:
-                    skill_stats[model_name][skill] = {}
-                    skill_stats[model_name][skill][TIME_SERIES] = []
-                    skill_stats[model_name][skill][SCORES] = []
-                skill_stats[model_name][skill][TIME_SERIES].append(month)
-                skill_stats[model_name][skill][SCORES].append(monthly_skills_and_scores[month][skill])
-
-
-def load_label_files(lf_name):
-    label_files = set()
-    if lf_name:
-        print(f"Loading label files from {lf_name}", flush=True)
-        with open(lf_name, "r") as f:
-            for line in f:
-                labels = json.loads(line)
-                if REPO not in labels or FILE not in labels:
-                    continue
-                repo = labels[REPO]
-                file = labels[FILE]
-                label_files.add(get_repo_user_key(repo, file))
-        print(f"Loaded {len(label_files)} label files", flush=True)
-    return label_files
+                user_profile[LANGS][lang][TIME_SERIES][yyyy_mm][tag][s] = [0, 0]
+            skill_entry = user_profile[LANGS][lang][TIME_SERIES][yyyy_mm][tag][s]
+            skill_entry[0] += 1
+            skill_entry[1] += code_len
 
 
 def gen_user_name(users, team_name, max_len=255):
@@ -756,7 +642,6 @@ if __name__ == "__main__":
     parser.add_argument('--allow_list', type=str, help='List of repos,users to be allowed. e.g. label data users only',
                         default=None)
     parser.add_argument('--start_from_tmp', default=False, help='Start from tmp', action='store_true')
-    parser.add_argument('--label_file_list', type=str, help='Path to the Repo Topics JSONL', default=None)
     # Only needed for team profile
     parser.add_argument('--compress_output', default=False, help='Compress the output', action='store_true')
     parser.add_argument('--batch_size', type=int, help='Batch size for model evaluation', default=20)
@@ -773,7 +658,6 @@ if __name__ == "__main__":
     num_months = args.num_years * 12
     utc_now = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
     allow_list_user_repos = load_repo_user_list(args.allow_list)
-    label_file_list = load_label_files(args.label_file_list)
     if (not input_path and not repo_list) or not output_path:
         print("Invalid arguments")
         exit(1)

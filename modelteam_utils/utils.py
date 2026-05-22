@@ -7,7 +7,7 @@ import re
 import subprocess
 from calendar import monthrange
 
-from .constants import UNKNOWN, MIN_CHUNK_CHAR_LIMIT, C2S, LIFE_OF_PY, I2S, LANGS, TIME_SERIES, SKILLS
+from .constants import UNKNOWN, MIN_CHUNK_CHAR_LIMIT, C2S, LANGS, TIME_SERIES, SKILLS
 from .languages.CSharpPL import CSharpPL
 from .languages.CppPL import CppPL
 from .languages.DartPL import DartPL
@@ -444,7 +444,7 @@ def load_repo_user_list(file_name):
     return ignore_users
 
 
-def filter_skills(user_profile, min_scores, manual_edits=set()):
+def filter_skills(user_profile, min_snippet_count, manual_edits=set()):
     if not user_profile:
         return
     lang_stats = user_profile[LANGS]
@@ -455,31 +455,23 @@ def filter_skills(user_profile, min_scores, manual_edits=set()):
         for month in monthly_stats.keys():
             for model in monthly_stats[month].keys():
                 model_type = model.split("::")[0]
-                if model_type not in [C2S, I2S, LIFE_OF_PY]:
+                if model_type != C2S:
                     continue
-                min_score_to_filter = min_scores.get(model_type, 0)
                 model_stats = monthly_stats[month][model]
                 skills = list(model_stats.keys())
                 for skill in skills:
                     all_skills.add(skill)
-                    max_score, min_score, sum_score, new_max_score, new_min_score, new_sum_score, \
-                        snippet_count, code_line_count, doc_line_count, is_skill_from_labeled_file = model_stats[
-                        skill]
-                    # All skills should be in changes, so setting default to TOP_SECRET, so it will be removed
-                    if max_score <= min_score_to_filter:
+                    snippet_count, code_line_count = model_stats[skill]
+                    if snippet_count < min_snippet_count:
                         del model_stats[skill]
                         if skill in user_profile[SKILLS]:
                             user_profile[SKILLS][skill] -= code_line_count
-                            if user_profile[SKILLS][skill] < 0:
-                                user_profile[SKILLS][skill] = 0
-                    elif model_type != LIFE_OF_PY and (skill not in user_profile[SKILLS]
-                                                       or skill in manual_edits):
-                        # Ignore skills that are not present in user profile (No C2S) or top secret skills
+                            if user_profile[SKILLS][skill] <= 0:
+                                del user_profile[SKILLS][skill]
+                    elif skill not in user_profile[SKILLS] or skill in manual_edits:
                         del model_stats[skill]
-                    elif model_type == C2S:
-                        # Ignore skills that are not present in C2S model results
+                    else:
                         all_good_skills.add(skill)
-    # Remove skills that are not present in any month
     for skill in all_skills:
         if skill in user_profile[SKILLS]:
             if skill in manual_edits or skill not in all_good_skills:

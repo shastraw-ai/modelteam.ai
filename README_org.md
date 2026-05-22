@@ -1,7 +1,7 @@
 # modelteam: AI-Powered Skill Validation for Engineers
 
 **[modelteam](https://modelteam.ai)** is an AI-driven platform that helps engineers validate and showcase their skills.
-By analyzing real-world coding contributions, modelteam provides insights into expertise and code quality. Our platform helps teams identify and retain top talent and ensures the best engineers are matched to the
+By analyzing real-world coding contributions, modelteam provides insights into expertise and skills. Our platform helps teams identify and retain top talent and ensures the best engineers are matched to the
 right roles, optimizing performance and success.
 
 [View Sample Profile](https://app.modelteam.ai/profile?id=1da842a06520c30722ff3efb96d67a482cd689e6d43b87c882d4b690975a7c31)
@@ -11,9 +11,9 @@ analysis in **15+ programming languages**.
 
 ## Security & Privacy
 
-Your code and data remain **on your local machine**. The AI models run locally, ensuring no data is transferred
-externally. The generated profile contains only metadata and predicted skills, with an option to remove specific skills
-before uploading.
+Your code and data remain **on your local machine**. Skill extraction runs locally via [Ollama](https://ollama.com),
+ensuring no data is transferred externally. The generated profile contains only metadata and predicted skills, with an
+option to remove specific skills before uploading.
 
 ## Supported Languages
 
@@ -27,10 +27,9 @@ Python, JavaScript, TypeScript, Java, Go, C, C++, PHP, Ruby, C#, Rust, Scala, Sw
 - Pip
 - Python-venv (if not included in Python installation)
 - Git (command line)
+- [Ollama](https://ollama.com) installed and running
 - Turn off sleep mode so the script can run without interruptions
     - Optional: caffeine (for linux)
-- [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170) (
-  for Windows)
 - You should have made contributions for a minimum period of 3 months.
 
 ### Compute Needs
@@ -59,7 +58,7 @@ Python, JavaScript, TypeScript, Java, Go, C, C++, PHP, Ruby, C#, Rust, Scala, Sw
 
 - Create an account in [modelteam](https://app.modelteam.ai/org/)
 - Run the following commands to generate your profile
-    - Our AI models run locally on your machine and does not send any data outside your machine.
+    - Skill extraction runs locally on your machine via Ollama and does not send any data outside your machine.
     - Generates a JSON file for creating your modelteam.ai verified profile
 
 ### 1. Install modelteam Locally (in a virtual environment)
@@ -87,7 +86,7 @@ This script:
 
 - Sets up a virtual environment. **So, it doesn't affect your system Python**
 - Installs dependencies in the virtual environment
-- Downloads AI models
+- Pulls the Ollama model for skill extraction
 
 <details open>
   <summary><h2>Team Profile Builder Tool (Mac & Windows)</h2></summary>
@@ -191,7 +190,7 @@ git log --author=%USERNAME% --pretty=format:"%%ae"
 
 ### 3. Extract Skills from Your Code
 - **This is to build team profile, for individuals to fenerate their profiles, refer to [Profile Generation](README.md)**
-- For this step, no internet access is required. Everything stays on your local machine
+- For this step, no internet access is required (Ollama runs locally). Everything stays on your local machine
 
 **For the entire team**
 <details open>

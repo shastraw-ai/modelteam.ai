@@ -387,7 +387,7 @@ def apply_choices(merged_profile, choices_file, edited_file, bad_skills):
         skills_to_remove = top_secret_set.union(bad_skills)
         for profile in merged_profile[PROFILES]:
             stats = profile[STATS]
-            filter_skills(stats, {}, skills_to_remove)
+            filter_skills(stats, 0, skills_to_remove)
             profile[NR_SKILLS] = non_relevant_skills
             profile[TIMESTAMP] = utc_now
         merged_profile[TIMESTAMP] = utc_now
