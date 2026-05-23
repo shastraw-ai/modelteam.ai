@@ -14,34 +14,13 @@ from PyQt5.QtWidgets import (QWidget, QLabel, QRadioButton, QVBoxLayout, QHBoxLa
 from modelteam_utils.constants import USER, REPO, STATS, SKILLS, RELEVANT, NOT_RELEVANT, TOP_SECRET, PROFILES, \
     NR_SKILLS, TIMESTAMP, MT_PROFILE_JSON, PDF_STATS_JSON
 from modelteam_utils.crypto_utils import compress_file, generate_hc
+from modelteam_utils.html_report import generate_html_report
+from modelteam_utils.qt_style import APP_STYLESHEET
 from modelteam_utils.utils import filter_skills, sha256_hash, load_skill_config
 from modelteam_utils.utils import trunc_string
 from modelteam_utils.viz_utils import generate_pdf_report
 
 display_names = {}
-
-button_style = """
-    QPushButton {
-        background-color: #0078D4;  /* Nice blue shade */
-        color: white;
-        font-size: 14px;
-        font-weight: bold;
-        border-radius: 6px;
-        padding: 8px 16px;
-        border: 2px solid #005A9E;
-    }
-    QPushButton:hover {
-        background-color: #005A9E;
-    }
-    QPushButton:pressed {
-        background-color: #004578;
-    }
-    QPushButton:disabled {
-        background-color: #C8C8C8;
-        color: #6A6A6A;
-        border: 2px solid #979797;
-    }
-"""
 
 def get_skill_display_name(skill):
     return display_names.get(skill, skill.title())
@@ -67,91 +46,105 @@ class App(QWidget):
             self.save_button.setEnabled(False)
 
     def init_ui(self):
-        self.setWindowTitle("Edit Skills")
-        self.setStyleSheet("background-color: #333333; color: white;")
-        self.setGeometry(100, 100, 800, 800)
+        self.setWindowTitle("modelteam · edit skills")
+        self.setGeometry(100, 100, 880, 860)
         layout = QVBoxLayout()
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
 
-        # Top frame for logo and display fields
-        top_frame = QHBoxLayout()
-        layout.addLayout(top_frame)
-
-        # Add logo image (PNG)
+        # Header: logo + title
         pixmap = QPixmap(os.path.join("images", "modelteam_logo.png"))
+        if not pixmap.isNull():
+            pixmap = pixmap.scaledToHeight(48, Qt.SmoothTransformation)
         logo_label = QLabel()
         logo_label.setPixmap(pixmap)
-        top_frame.addWidget(logo_label)
 
-        repo_csv_label = QTextBrowser()
+        title_label = QLabel("Edit Skills")
+        title_label.setStyleSheet(
+            "font-size: 22px; font-weight: 600; color: #e6edf3; padding-left: 12px;"
+        )
+        subtitle_label = QLabel(f"{self.email} · {len(self.skills)} predicted skills")
+        subtitle_label.setProperty("hint", True)
+        subtitle_label.setStyleSheet("color: #8b949e; font-size: 13px; padding-left: 12px;")
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+        title_box.addWidget(title_label)
+        title_box.addWidget(subtitle_label)
+
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(logo_label)
+        header_layout.addLayout(title_box, 1)
+        layout.addLayout(header_layout)
+
         explanation = (
-            f"""<html>
-<h4><b>Email:</b> {self.email}<br>      
-<b>Repos:</b> {self.repocsv}<br>
-<b>Total Skills:</b> {len(self.skills)}</h4>
-<p style="font-size:12px; ">These are the skills that our models predicted after analyzing your code contributions.
-<br/><b>These skills will further be scored by another model on the server side.</b>
-<br><b>Not Relevant</b>: Our model will use this as feedback in future. Skill will be removed from your profile on the server.
-<br><b>Top Secret</b>: DON'T even send this skill it to the server.
+            f"""<html><body style="color:#e6edf3;">
+<p style="font-size:12.5px; line-height:1.6; margin:0 0 8px 0;">
+These are the skills our models predicted after analyzing your code contributions.
+On the server side they will be scored further by another model.
 </p>
-</html>
-""")
-        repo_csv_label.setMaximumHeight(300)
+<p style="font-size:12.5px; line-height:1.7; margin:0 0 8px 0;">
+<span style="color:#a855f7;"><b>Relevant</b></span> — keep on profile.<br>
+<span style="color:#06b6d4;"><b>Not Relevant</b></span> — drop from server profile (feedback to the model).<br>
+<span style="color:#ef4444;"><b>Top Secret</b></span> — never even send to the server.
+</p>
+<p style="font-size:12.5px; margin:0;">
+<span style="color:#8b949e;">Repos analyzed: {self.repocsv}</span>
+</p>
+</body></html>"""
+        )
+        repo_csv_label = QTextBrowser()
+        repo_csv_label.setMaximumHeight(200)
         repo_csv_label.setHtml(explanation)
         repo_csv_label.setWordWrapMode(QTextOption.WordWrap)
-        repo_csv_label.setStyleSheet("color: white;")
         layout.addWidget(repo_csv_label)
 
         # Scroll area for skills
+        self.add_choice_header(layout)
+
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        scroll_area.setStyleSheet("background-color: #333333;")
 
         scroll_content = QWidget()
         scroll_layout = QVBoxLayout(scroll_content)
-        scroll_layout.setContentsMargins(0, 0, 0, 0)
-        scroll_layout.setSpacing(1)
+        scroll_layout.setContentsMargins(2, 2, 2, 2)
+        scroll_layout.setSpacing(3)
         scroll_area.setWidget(scroll_content)
-        self.add_choice_header(layout)
-        layout.setSpacing(1)
+
         toggle = False
         for skill in self.skills:
             self.add_choice_widget(scroll_layout, skill, self.default_choices.get(skill, RELEVANT), toggle)
             toggle = not toggle
-        t_n_c_text = f"""
-<h4>Terms and Conditions. Please accept to proceed.</h4>
-<ol>
-<li>I am the owner of the id {self.email} associated with this profile</li>
-<li>I own the code contributions associated with this id</li>
-<li>I will remove any confidential skills from the profile in this step before uploading</li>
-"""
-        layout.addWidget(scroll_area)
+        scroll_layout.addStretch(1)
+        layout.addWidget(scroll_area, 1)
+
+        t_n_c_text = f"""<html><body style="color:#e6edf3;">
+<p style="font-size:13px; font-weight:600; margin:0 0 6px 0;">Terms and conditions</p>
+<ul style="font-size:12.5px; margin:0 0 0 16px; padding:0;">
+<li>I am the owner of the id <span style="color:#06b6d4;">{self.email}</span> associated with this profile.</li>
+<li>I own the code contributions associated with this id.</li>
+<li>I will remove any confidential skills from the profile in this step before uploading.</li>
+</ul>
+</body></html>"""
         self.t_n_c_label = QTextBrowser()
-        self.t_n_c_label.setMaximumHeight(150)
+        self.t_n_c_label.setMaximumHeight(120)
         self.t_n_c_label.setHtml(t_n_c_text)
         self.t_n_c_checkbox = QCheckBox("I accept the terms and conditions")
-        self.t_n_c_checkbox.setStyleSheet("color: white;")
         self.t_n_c_checkbox.stateChanged.connect(self.enable_save_button)
         layout.addWidget(self.t_n_c_label)
         layout.addWidget(self.t_n_c_checkbox)
+
         button_layout = QHBoxLayout()
-        button_layout.setSpacing(10)
-        button_layout.setContentsMargins(20, 20, 20, 20)
+        button_layout.setSpacing(12)
+        button_layout.setContentsMargins(0, 8, 0, 0)
+        button_layout.addStretch(1)
         self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setFixedWidth(150)
-        self.cancel_button.setFixedHeight(30)
-        font = self.cancel_button.font()
-        font.setBold(True)
-        self.cancel_button.setFont(font)
-        self.cancel_button.setStyleSheet(button_style)
+        self.cancel_button.setProperty("secondary", True)
+        self.cancel_button.setMinimumWidth(140)
         self.cancel_button.clicked.connect(self.close_window)
         button_layout.addWidget(self.cancel_button)
         self.save_button = QPushButton("Save Choices")
-        font = self.save_button.font()
-        font.setBold(True)
-        self.save_button.setFont(font)
-        self.save_button.setFixedWidth(150)
-        self.save_button.setFixedHeight(30)
-        self.save_button.setStyleSheet(button_style)
+        self.save_button.setMinimumWidth(160)
         self.save_button.clicked.connect(self.save_choices)
         self.save_button.setEnabled(False)
         button_layout.addWidget(self.save_button)
@@ -162,44 +155,40 @@ class App(QWidget):
 
     def add_choice_header(self, layout):
         frame = QFrame()
-        frame.setFrameShape(QFrame.StyledPanel)
         frame_layout = QHBoxLayout(frame)
-        frame_layout.setContentsMargins(2, 2, 2, 2)
+        frame_layout.setContentsMargins(10, 4, 10, 4)
         label = QLabel("Skill")
-        font = label.font()
-        font.setBold(True)
-        label.setFont(font)
-        label.setFixedWidth(200)
-        label.setAlignment(Qt.AlignCenter)
+        label.setProperty("heading", True)
+        label.setStyleSheet(
+            "font-size: 11px; font-weight: 600; letter-spacing: 0.12em; color: #6e7681;"
+        )
+        label.setFixedWidth(220)
         frame_layout.addWidget(label)
-        names = [RELEVANT, NOT_RELEVANT, TOP_SECRET]
-        for name in names:
+        for name in [RELEVANT, NOT_RELEVANT, TOP_SECRET]:
             header_layout = QHBoxLayout()
             header_layout.setAlignment(Qt.AlignCenter)
-            label = QLabel(name)
-            font = label.font()
-            font.setBold(True)
-            label.setFont(font)
-            header_layout.addWidget(label)
+            header_label = QLabel(name.upper())
+            header_label.setStyleSheet(
+                "font-size: 11px; font-weight: 600; letter-spacing: 0.12em; color: #6e7681;"
+            )
+            header_layout.addWidget(header_label)
             frame_layout.addLayout(header_layout)
         layout.addWidget(frame)
 
     def add_choice_widget(self, layout, skill, def_enabled, toggle_bg_color):
         frame = QFrame()
-        frame.setFrameShape(QFrame.StyledPanel)
         if toggle_bg_color:
-            frame.setStyleSheet("background-color: #444444;")
+            frame.setProperty("alt", True)
         frame_layout = QHBoxLayout(frame)
-        frame_layout.setContentsMargins(10, 0, 10, 0)
+        frame_layout.setContentsMargins(10, 4, 10, 4)
 
         label = QLabel(get_skill_display_name(skill))
-        label.setFixedWidth(200)
+        label.setFixedWidth(220)
         label.setWordWrap(True)
         frame_layout.addWidget(label)
 
         button_group = QButtonGroup()
-        names = [RELEVANT, NOT_RELEVANT, TOP_SECRET]
-        for name in names:
+        for name in [RELEVANT, NOT_RELEVANT, TOP_SECRET]:
             radio_layout = QHBoxLayout()
             radio_layout.setAlignment(Qt.AlignCenter)
             radio = QRadioButton()
@@ -255,6 +244,7 @@ def edit_profile(merged_profile, choices_file, cli_mode):
         return 0, bad_skills
     else:
         app = QApplication(sys.argv)
+        app.setStyleSheet(APP_STYLESHEET)
         ex = App(email, ",".join(repos), skill_list, choices_file, default_choices)
         return app.exec_(), bad_skills
 
@@ -412,7 +402,7 @@ def print_file_tree(currentDir, fullPath):
         print("   " * i + prefix + part)
 
 
-def print_message(pdf_file, final_output_file):
+def print_message(pdf_file, html_file, final_output_file):
     star_line = "*" * 80
     blue_text = "\033[94m"
     reset_text = "\033[0m"
@@ -420,6 +410,11 @@ def print_message(pdf_file, final_output_file):
     print("📄 PDF Report Generated!")
     print("⚠️ This is for your personal use only and is NOT needed by modelteam.ai.")
     print(f"📂 Saved at: {pdf_file}")
+    print()
+    print("🌐 HTML Profile Generated!")
+    print("✅ Safe to host publicly — contains no repo names, file paths, or commit messages.")
+    print(f"📂 Saved at: {html_file}")
+    print(f"   Open in browser: file://{os.path.abspath(html_file)}")
     print()
     print(star_line)
     print(f"📂 \033[1mFinal Output:\033[0m{final_output_file}")
@@ -463,7 +458,8 @@ if __name__ == "__main__":
         final_output_file = os.path.join(args.profile_path, f"mt_stats_{today}_{hc}.json.gz")
         compress_file(edited_file, final_output_file)
         pdf_file = generate_pdf_report(edited_file, pdf_stats_json, pdf_path)
-        print_message(pdf_file, final_output_file)
+        html_file = generate_html_report(edited_file, args.profile_path)
+        print_message(pdf_file, html_file, final_output_file)
     else:
         print("Changes were NOT SAVED. Exiting... Please run the script again.")
         sys.exit(0)
