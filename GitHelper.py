@@ -5,8 +5,9 @@ from datetime import datetime, timedelta
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
-from PyQt5.QtWidgets import QApplication, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, \
-    QListWidget, QLabel, QComboBox, QTextEdit, QListWidgetItem, QSpinBox, QDialog, QCheckBox
+from PyQt5.QtWidgets import (QApplication, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog,
+    QListWidget, QLabel, QComboBox, QTextEdit, QListWidgetItem, QSpinBox, QDialog, QCheckBox,
+    QLineEdit, QMessageBox)
 
 from edit_skills import run_edit_and_sign
 from modelteam_utils.qt_style import APP_STYLESHEET
@@ -82,14 +83,24 @@ class GitHelperTool(QDialog):
         self.scan_authors_button.setEnabled(False)
 
         # Step 3 — Author / years
-        self.author_label = QLabel("Step 3 — Select your author email")
+        self.author_label = QLabel("Step 3 — Select your author email(s)")
         self.author_label.setProperty("heading", True)
-        self.author_combo = QComboBox(self)
+        self.author_list = QListWidget(self)
+        self.author_list.setMinimumHeight(100)
+        self.author_list.setMaximumHeight(140)
+        self.author_list.itemChanged.connect(self.on_author_selection_changed)
         self.author_note = QLabel(
-            "If you have multiple git email IDs, run this tool once per email to build a complete profile."
+            "Select multiple emails if you use different git IDs across repos."
         )
         self.author_note.setProperty("hint", True)
         self.author_note.setWordWrap(True)
+
+        self.display_name_label = QLabel("Display name (required when selecting multiple emails)")
+        self.display_name_label.setProperty("heading", True)
+        self.display_name_input = QLineEdit(self)
+        self.display_name_input.setPlaceholderText("e.g. John Doe")
+        self.display_name_label.setVisible(False)
+        self.display_name_input.setVisible(False)
 
         self.num_years_label = QLabel("History window (years)")
         self.num_years_input = QSpinBox(self)
@@ -129,10 +140,10 @@ class GitHelperTool(QDialog):
 
         self.layout.addSpacing(4)
         self.layout.addWidget(self.author_label)
-        author_row = QHBoxLayout()
-        author_row.addWidget(self.author_combo, 1)
-        self.layout.addLayout(author_row)
+        self.layout.addWidget(self.author_list)
         self.layout.addWidget(self.author_note)
+        self.layout.addWidget(self.display_name_label)
+        self.layout.addWidget(self.display_name_input)
 
         years_row = QHBoxLayout()
         years_row.addWidget(self.num_years_label)
@@ -160,7 +171,7 @@ class GitHelperTool(QDialog):
         """Find all Git repositories in the provided path."""
         self.git_repos = []
         self.selected_repos = []
-        self.author_combo.clear()
+        self.author_list.clear()
         self.repo_list.clear()
 
         for root, dirs, files in os.walk(self.input_path):
@@ -190,8 +201,15 @@ class GitHelperTool(QDialog):
 
         authors = self.find_authors()
 
-        self.author_combo.clear()
-        self.author_combo.addItems(authors[:20])  # Display only the first 10 authors
+        self.author_list.blockSignals(True)
+        self.author_list.clear()
+        for author in authors[:20]:
+            item = QListWidgetItem(author)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if author == self.current_user else Qt.Unchecked)
+            self.author_list.addItem(item)
+        self.author_list.blockSignals(False)
+        self.on_author_selection_changed()
         self.run_button.setEnabled(True)
 
     def get_selected_repos(self):
@@ -240,39 +258,73 @@ class GitHelperTool(QDialog):
         except subprocess.CalledProcessError:
             return ""
 
-    def run_git_command(self):
-        """Run the Git command using the selected repos and author."""
-        selected_author = self.author_combo.currentText()
-        selected_repos = self.get_selected_repos()
+    def on_author_selection_changed(self):
+        checked = self._get_checked_authors()
+        show_name = len(checked) > 1
+        self.display_name_label.setVisible(show_name)
+        self.display_name_input.setVisible(show_name)
+        if show_name and not self.display_name_input.text():
+            local = checked[0].split("@")[0] if checked else ""
+            self.display_name_input.setText(local)
 
-        if not selected_repos or not selected_author:
+    def _get_checked_authors(self):
+        checked = []
+        for i in range(self.author_list.count()):
+            item = self.author_list.item(i)
+            if item.checkState() == Qt.Checked:
+                checked.append(item.text())
+        return checked
+
+    def run_git_command(self):
+        selected_repos = self.get_selected_repos()
+        checked_authors = self._get_checked_authors()
+
+        if not selected_repos or not checked_authors:
             self.output_terminal.append("Please select at least one repository and an author.")
+            return
+        if len(checked_authors) > 1 and not self.display_name_input.text().strip():
+            QMessageBox.warning(self, "Display name required",
+                                "Please enter a display name when selecting multiple emails.")
             return
         self.accept()
 
     def get_selected_data(self):
-        selected_author = self.author_combo.currentText()
-        return self.selected_repos, selected_author, self.num_years, self.force_rerun.isChecked()
+        checked_authors = self._get_checked_authors()
+        display_name = self.display_name_input.text().strip() if len(checked_authors) > 1 else None
+        emails_csv = ",".join(checked_authors)
+        return self.selected_repos, emails_csv, self.num_years, self.force_rerun.isChecked(), display_name
 
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     app.setStyleSheet(APP_STYLESHEET)
     window = GitHelperTool()
-    if window.exec_() == QDialog.Accepted:
-        selected_repos, selected_author, num_years, force_rerun = window.get_selected_data()
-        tmp_repo_file_name = os.path.join(os.getcwd(), "repo_list_autogen.txt")
-        with open(tmp_repo_file_name, "w") as f:
-            for repo in selected_repos:
-                f.write(repo + "\n")
-        profile_path_file = get_profile_path_file_name(selected_author)
-        if os.path.exists(profile_path_file):
-            os.remove(profile_path_file)
-        output_path = run_model_team_git_parser(tmp_repo_file_name, selected_author, int(num_years), False, None,
-                                                force_rerun)
-        with open(profile_path_file, "w") as f:
-            f.write(output_path)
-        if output_path:
-            run_edit_and_sign(output_path, False, False)
-    else:
+    accepted = window.exec_() == QDialog.Accepted
+    if accepted:
+        selected_repos, emails_csv, num_years, force_rerun, display_name = window.get_selected_data()
+
+    # Tear down Qt so the child edit_and_sign process can own the macOS window server
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+    app.quit()
+    del window, app
+
+    if not accepted:
         print("Dialog closed... error")
+        sys.exit(1)
+
+    tmp_repo_file_name = os.path.join(os.getcwd(), "repo_list_autogen.txt")
+    with open(tmp_repo_file_name, "w") as f:
+        for repo in selected_repos:
+            f.write(repo + "\n")
+    profile_id = display_name if display_name else emails_csv
+    profile_path_file = get_profile_path_file_name(profile_id)
+    if os.path.exists(profile_path_file):
+        os.remove(profile_path_file)
+    output_path = run_model_team_git_parser(tmp_repo_file_name, emails_csv, int(num_years), False, None,
+                                            force_rerun, display_name=display_name)
+    with open(profile_path_file, "w") as f:
+        f.write(output_path)
+    if output_path:
+        run_edit_and_sign(output_path, False, False)

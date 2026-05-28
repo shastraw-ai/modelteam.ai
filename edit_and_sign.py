@@ -11,14 +11,14 @@ from PyQt5.QtWidgets import (QWidget, QLabel, QRadioButton, QVBoxLayout, QHBoxLa
                              QPushButton, QButtonGroup, QMessageBox, QFrame, QApplication, QTextBrowser, QTextEdit,
                              QCheckBox)
 
-from modelteam_utils.ai_utils import check_ollama_ready, init_ollama
+from modelteam_utils.ai_utils import check_ollama_ready, init_ollama, rank_skills_for_profile
 from modelteam_utils.constants import USER, REPO, STATS, SKILLS, RELEVANT, NOT_RELEVANT, PROFILES, \
     NR_SKILLS, TIMESTAMP, MT_PROFILE_JSON, PDF_STATS_JSON
 from modelteam_utils.html_report import generate_html_report
 from modelteam_utils.md_report import generate_md_report
 from modelteam_utils.qt_style import APP_STYLESHEET
 from modelteam_utils.skill_filter import CACHE_FILENAME, filter_profile_skills
-from modelteam_utils.utils import filter_skills, load_skill_config, trunc_string
+from modelteam_utils.utils import filter_skills, get_extension_to_language_map, load_skill_config, trunc_string
 from modelteam_utils.viz_utils import generate_pdf_report
 
 display_names = {}
@@ -244,16 +244,25 @@ def edit_profile(merged_profile, choices_file, cli_mode, model_data=None, cache_
         print("No skills survived filtering. Nothing to edit.", flush=True)
         return 0, list(pre_filter_drops), canonical_map
 
-    avg_count = sum(skills.values()) / len(skills)
-    threshold = 0.2 * avg_count
-    threshold_bad = [skill for skill in skills if skills[skill] < threshold]
-    for s in threshold_bad:
-        del skills[s]
-    bad_skills = list(pre_filter_drops) + threshold_bad
+    bad_skills = list(pre_filter_drops)
     skill_list = sorted(skills.keys(), key=lambda x: skills[x], reverse=True)
     if not os.path.exists(choices_file):
-        # mark bottom 30% as not relevant and others as relevant
-        default_choices = {skill: RELEVANT if skills[skill] > 0.4 * avg_count else NOT_RELEVANT for skill in skill_list}
+        if model_data:
+            lang_map = get_extension_to_language_map()
+            languages = set()
+            for profile in merged_profile[PROFILES]:
+                for ext in (profile.get(STATS, {}).get("langs", {}) or {}).keys():
+                    languages.add(lang_map.get(ext, ext))
+            print("  Ranking skills for profile relevance...", flush=True)
+            relevant_set = rank_skills_for_profile(model_data, skills, languages)
+            default_choices = {
+                skill: RELEVANT if skill in relevant_set else NOT_RELEVANT
+                for skill in skill_list
+            }
+            rel_count = sum(1 for v in default_choices.values() if v == RELEVANT)
+            print(f"  LLM marked {rel_count}/{len(skill_list)} skills as relevant.", flush=True)
+        else:
+            default_choices = {skill: RELEVANT for skill in skill_list}
     else:
         with open(choices_file, 'r') as f:
             default_choices = json.load(f)

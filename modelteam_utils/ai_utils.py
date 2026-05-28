@@ -155,3 +155,62 @@ def normalize_skill_names(raw_skills):
             normalized.append(s)
             seen.add(key)
     return normalized
+
+
+PROFILE_RANK_PROMPT = (
+    "You curate a software engineer's public profile. Given their programming languages "
+    "and extracted skill list, decide which skills should appear on the profile.\n\n"
+    "GUIDELINES:\n"
+    "1. RELEVANT: specific, distinctive skills that showcase real expertise — named "
+    "frameworks, libraries, platforms, tools, concrete disciplines. A skill mentioned "
+    "rarely can still be highly relevant (e.g. Kubernetes from a few config files).\n"
+    "2. NOT RELEVANT: skills that are too generic, too expected given their stack, "
+    "redundant with another skill already marked relevant, or add noise.\n"
+    "3. Aim for 15-30 relevant skills. Fewer is better than padding with filler.\n"
+    "4. Consider the developer's apparent specialization from their language mix.\n"
+    "5. Frequency scores are provided but should NOT dominate — a low-frequency skill "
+    "can be more profile-worthy than a high-frequency generic one.\n\n"
+    "Return ONLY JSON: {\"relevant\": [\"Skill1\", \"Skill2\", ...], "
+    "\"not_relevant\": [\"Skill3\", \"Skill4\", ...]}\n"
+    "Every input skill must appear in exactly one list."
+)
+
+
+def rank_skills_for_profile(model_data, skills_with_scores, languages):
+    """Ask the LLM which skills should default to RELEVANT on the profile.
+
+    Returns a set of skill names deemed relevant.
+    Falls back to all-relevant on error.
+    """
+    url = f"{model_data['endpoint']}/api/chat"
+
+    skill_entries = [f"{s} (score: {v:.1f})" for s, v in
+                     sorted(skills_with_scores.items(), key=lambda x: -x[1])]
+    user_content = (
+        f"Languages: {', '.join(sorted(languages))}\n\n"
+        f"Skills:\n{json.dumps(skill_entries)}"
+    )
+
+    payload = {
+        "model": model_data["model"],
+        "messages": [
+            {"role": "system", "content": PROFILE_RANK_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        "stream": False,
+        "format": "json",
+        "think": False,
+        "options": {"temperature": 0.0, "num_predict": 2048},
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=120)
+        resp.raise_for_status()
+        content = resp.json()["message"]["content"]
+        parsed = json.loads(content)
+        relevant = parsed.get("relevant", [])
+        if isinstance(relevant, list) and relevant:
+            return set(relevant)
+        return set(skills_with_scores.keys())
+    except Exception as e:
+        print(f"  Profile ranking error: {e}", flush=True)
+        return set(skills_with_scores.keys())

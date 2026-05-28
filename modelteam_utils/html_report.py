@@ -107,6 +107,7 @@ def _build_report_data(merged_profile):
 
     return {
         "user": merged_profile.get(USER, ""),
+        "git_ids": merged_profile.get("git_ids", []),
         "timestamp": merged_profile.get(TIMESTAMP, 0),
         "hc": merged_profile.get(PHC, ""),
         "merged_skills": {k: round(v, 4) for k, v in merged_skills.items()},

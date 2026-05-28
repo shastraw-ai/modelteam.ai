@@ -289,6 +289,7 @@ def _fmt(n):
 def _render_markdown(report_data, has):
     user = report_data.get("user", "Developer")
     display_name = user.split("@")[0] if "@" in user else user
+    git_ids = report_data.get("git_ids", [])
 
     merged_skills = report_data.get("merged_skills", {})
     lang_qtr_added = report_data.get("lang_qtr_added", {})
@@ -323,8 +324,10 @@ def _render_markdown(report_data, has):
         f"**{len(sorted_skills)}** skills identified"
     )
     if active_span and active_span != "no recent activity":
-        md.append(f"  \n*Active: {active_span}*\n")
-    md.append("\n</div>\n")
+        md.append(f"  \n*Active: {active_span}*")
+    if git_ids:
+        md.append(f"  \n*Git IDs: {', '.join(git_ids)}*")
+    md.append("\n\n</div>\n")
 
     # ── Word cloud hero ──
     if has.get("cloud"):

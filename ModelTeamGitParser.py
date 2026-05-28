@@ -17,7 +17,7 @@ from modelteam_utils.constants import (ADDED, DELETED, TIME_SERIES, LANGS, LIBS,
                                        TOO_BIG_TO_ANALYZE_LIMIT, TOO_BIG_TO_ANALYZE,
                                        SIGNIFICANT_CONTRIBUTION_LINE_LIMIT, MAX_DIFF_SIZE, STATS, USER, REPO, REPO_PATH,
                                        SIG_CODE_SNIPPETS, SKILLS, FILE, IMPORTS, CHUNK_CHAR_LIMIT, VERSION,
-                                       PROFILES, PHC, TIMESTAMP, TEAM, C2S, SS_LC)
+                                       PROFILES, PHC, TIMESTAMP, TEAM, C2S, SS_LC, GIT_IDS)
 from modelteam_utils.constants import MT_PROFILE_JSON, PDF_STATS_JSON
 from modelteam_utils.crypto_utils import generate_hc
 from modelteam_utils.utils import break_code_snippets_to_chunks, filter_skills, yyyy_mm_to_quarter, get_extension_to_language_map
@@ -48,6 +48,7 @@ class ModelTeamGitParser:
         self.config = config
         self.pdf_stats = {}
         self.model_data = None
+        self.display_name = None
 
     @staticmethod
     def add_to_time_series_stats(commits, file_extension, yyyy_mm, key, inc_count):
@@ -62,12 +63,6 @@ class ModelTeamGitParser:
             commits[LANGS][file_extension][TIME_SERIES][yyyy_mm][key] += inc_count
 
     def get_commits_for_each_user(self, repo_path, min_months, num_months, usernames=None):
-        """
-        Get the list of commits for each user in the given repo. If username is None, then get commits for all users
-        :param repo_path:
-        :param usernames:
-        :return:
-        """
         if not usernames:
             usernames = set()
         commits = {}
@@ -79,23 +74,22 @@ class ModelTeamGitParser:
             for line in lines:
                 (author_email, commit_timestamp, commit_hash) = line.split('\x01')
                 author_email = author_email.strip().lower()
-                # TODO: Check if this is needed
                 if usernames and author_email not in usernames:
-                    print(f"ERROR: EmailID mismatch. Given email {usernames} but found {author_email}")
                     continue
-                # ignore if email is empty
                 if not author_email:
                     continue
-                if author_email not in commits:
-                    commits[author_email] = {}
-                    commits[author_email][COMMITS] = []
-                if author_email not in user_months:
-                    user_months[author_email] = set()
-                user_months[author_email].add(timestamp_to_yyyy_mm(int(commit_timestamp)))
-                commits[author_email][COMMITS].append((commit_hash, int(commit_timestamp)))
-            for user in user_months:
+                user_key = self.display_name if self.display_name else author_email
+                if user_key not in commits:
+                    commits[user_key] = {}
+                    commits[user_key][COMMITS] = []
+                if user_key not in user_months:
+                    user_months[user_key] = set()
+                user_months[user_key].add(timestamp_to_yyyy_mm(int(commit_timestamp)))
+                commits[user_key][COMMITS].append((commit_hash, int(commit_timestamp)))
+            for user in list(user_months.keys()):
                 if len(user_months[user]) < min_months:
-                    del commits[user]
+                    if user in commits:
+                        del commits[user]
         return commits
 
     @staticmethod
@@ -115,7 +109,10 @@ class ModelTeamGitParser:
         file_line_stats = {}  # Dictionary to store file line stats
         add_pdf_stats = False
         if args and args.user_emails:
-            add_pdf_stats = curr_user == args.user_emails.strip().lower()
+            if self.display_name:
+                add_pdf_stats = curr_user == self.display_name
+            else:
+                add_pdf_stats = curr_user == args.user_emails.strip().lower()
         if result:
             if add_pdf_stats:
                 repo_name = os.path.basename(repo_path)
@@ -606,10 +603,17 @@ def gen_user_name(users, team_name, max_len=255):
     return user
 
 
-def merge_json(users, output_file_list, merged_json_file_name, team_name, end_ts):
-    user = gen_user_name(users, team_name)
+def merge_json(users, output_file_list, merged_json_file_name, team_name, end_ts, display_name=None, git_emails=None):
+    if display_name:
+        user = display_name
+    else:
+        user = gen_user_name(users, team_name)
     phc = generate_hc(os.path.abspath(sys.argv[0]))
     merged_profile = {USER: user, TIMESTAMP: utc_now, PROFILES: [], PHC: phc}
+    if git_emails and len(git_emails) > 1:
+        merged_profile[GIT_IDS] = sorted(git_emails)
+    elif git_emails and len(git_emails) == 1:
+        merged_profile[GIT_IDS] = sorted(git_emails)
     if team_name:
         merged_profile[TEAM] = team_name
     lines_added = 0
@@ -678,7 +682,8 @@ if __name__ == "__main__":
     parser.add_argument('--config', type=str, help='Config.ini path')
     parser.add_argument('--user_emails', type=str,
                         help='User emails as CSV, if present will generate stats only for those users')
-    # Used only for giving a team name when using multiple emails or for generating profiles for all users
+    parser.add_argument('--display_name', type=str, default=None,
+                        help='Display name for the profile. When set, all --user_emails are merged into one profile.')
     parser.add_argument('--team_name', type=str, help='Team Name', default=None)
     parser.add_argument('--num_years', type=int, help='Number of years to consider', default=2)
     parser.add_argument('--show_progress', default=False, help='Show progress bar', action='store_true')
@@ -746,6 +751,7 @@ if __name__ == "__main__":
         exit(1)
     randomized_folder_list = random.sample(folder_list, len(folder_list))
     git_parser = ModelTeamGitParser(config)
+    git_parser.display_name = args.display_name
     os.makedirs(output_path, exist_ok=True)
     os.makedirs(os.path.join(output_path, "tmp-stats"), exist_ok=True)
     os.makedirs(os.path.join(output_path, "touch-files"), exist_ok=True)
@@ -809,7 +815,8 @@ if __name__ == "__main__":
         if args.compress_output:
             end_date = datetime.datetime.fromtimestamp(end_ts, tz=datetime.timezone.utc).strftime('%Y-%m-%d')
             merged_json = f"{merged_json}_{end_date}.gz"
-        merge_json(usernames, final_outputs, merged_json, args.team_name, end_ts)
+        merge_json(usernames, final_outputs, merged_json, args.team_name, end_ts,
+                   display_name=args.display_name, git_emails=usernames)
         if git_parser.pdf_stats:
             # Single User Profile. Generate PDF Report
             pdf_stats_file = os.path.join(output_path, "tmp-stats", PDF_STATS_JSON)

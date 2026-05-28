@@ -97,7 +97,7 @@ def sanitize_email(email):
     return email.replace('@', '_').replace('.', '_')
 
 
-def run_model_team_git_parser(repo_list, email_id, num_years, is_dev_mode, team_name=None, force_rerun=False):
+def run_model_team_git_parser(repo_list, email_id, num_years, is_dev_mode, team_name=None, force_rerun=False, display_name=None):
     """Run the ModelTeamGitParser script with the appropriate arguments."""
     print("!!!IMPORTANT!!! Please turn off sleep mode so that the job is not interrupted.", flush=True)
     if is_dev_mode:
@@ -109,8 +109,8 @@ def run_model_team_git_parser(repo_list, email_id, num_years, is_dev_mode, team_
         team_path = get_output_path(team_name)
         output_path = os.path.join(team_path, curr_date)
     else:
-        # Sanitize the email ID for the output path
-        email_path = get_output_path(email_id)
+        path_id = display_name if display_name else email_id
+        email_path = get_output_path(path_id)
         output_path = os.path.join(email_path, curr_date)
 
     if force_rerun and os.path.exists(output_path) and output_path != "/":
@@ -140,6 +140,8 @@ def run_model_team_git_parser(repo_list, email_id, num_years, is_dev_mode, team_
 
     if email_id:
         cmd += ["--user_emails", email_id]
+    if display_name:
+        cmd += ["--display_name", display_name]
     if team_name:
         cmd += ["--team_name", team_name, "--compress_output"]
 

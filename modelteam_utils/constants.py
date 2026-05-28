@@ -67,5 +67,7 @@ MODEL_TYPES = [C2S]
 RELEVANT = "Relevant"
 NOT_RELEVANT = "Not Relevant"
 
+GIT_IDS = 'git_ids'
+
 OLLAMA_DEFAULT_ENDPOINT = "http://localhost:11434"
 OLLAMA_DEFAULT_MODEL = "gemma4:e4b"
