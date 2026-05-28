@@ -1,7 +1,6 @@
 import argparse
 import sys
 
-from modelteam_utils.utils import sha256_hash
 from setup_utils import get_python_bin, run_command_stream, get_profile_path_file_name
 
 
@@ -11,20 +10,14 @@ def usage():
     print("e.g. edit_skills.py -g user@org.ai")
 
 
-def run_edit_and_sign(input_path, git_email_id, cli_mode, dev):
-    if dev:
-        config = "../config-dev.ini"
-    else:
-        config = "config.ini"
-    user_key = sha256_hash(git_email_id)
+def run_edit_and_sign(input_path, cli_mode, dev):
+    config = "../config-dev.ini" if dev else "config.ini"
     python_bin = get_python_bin(create_venv=False)
     edit_and_sign_command = [
         python_bin, "-m", "edit_and_sign",
         "--profile_path", input_path,
-        "--user_key", user_key,
-        "--config", config
+        "--config", config,
     ]
-
     if cli_mode:
         edit_and_sign_command.append('--cli_mode')
     run_command_stream(edit_and_sign_command)
@@ -47,7 +40,7 @@ def main():
         print(f"{profile_path_file} not found. First run gen_git_stats.py")
         sys.exit(1)
     print("Loading...", flush=True)
-    run_edit_and_sign(input_path, git_email_id, cli_mode, args.dev)
+    run_edit_and_sign(input_path, cli_mode, args.dev)
 
 
 if __name__ == "__main__":

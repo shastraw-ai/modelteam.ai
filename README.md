@@ -1,9 +1,7 @@
 # modelteam: AI-Powered Skill Validation for Engineers
 
-**[modelteam](https://modelteam.ai)** is an AI-driven platform that helps engineers validate and showcase their skills.
-By analyzing real-world coding contributions, modelteam provides insights into expertise and skills.
-
-[View Sample Profile](https://app.modelteam.ai/profile?id=1da842a06520c30722ff3efb96d67a482cd689e6d43b87c882d4b690975a7c31)
+**[modelteam](https://modelteam.ai)** helps engineers validate and showcase their skills locally. It analyzes your
+real-world coding contributions and produces a stylish, standalone HTML profile you can host or share.
 
 modelteam is trained on contributions from over a million engineers across multiple open-source projects, supporting
 analysis in **15+ programming languages**.
@@ -11,8 +9,10 @@ analysis in **15+ programming languages**.
 ## Security & Privacy
 
 Your code and data remain **on your local machine**. Skill extraction runs locally via [Ollama](https://ollama.com),
-ensuring no data is transferred externally. The generated profile contains only metadata and predicted skills, with an
-option to remove specific skills before uploading.
+ensuring no data is transferred externally.
+
+The generated HTML profile is **publicly hostable**: it contains aggregate skill and language counts only, with no
+repo names, file paths, or commit messages.
 
 ## Supported Languages
 
@@ -26,7 +26,8 @@ Python, JavaScript, TypeScript, Java, Go, C, C++, PHP, Ruby, C#, Rust, Scala, Sw
 - Pip
 - Python-venv (if not included in Python installation)
 - Git (command line)
-- [Ollama](https://ollama.com) installed and running
+- [Ollama](https://ollama.com) — `setup.py` auto-installs it on Mac (via Homebrew) and Linux (via the official
+  installer). On Windows, install it manually first.
 - Turn off sleep mode so the script can run without interruptions
     - Optional: caffeine (for linux)
 - You should have made contributions for a **minimum period of 3 months**.
@@ -37,10 +38,13 @@ Python, JavaScript, TypeScript, Java, Go, C, C++, PHP, Ruby, C#, Rust, Scala, Sw
 
 ### Extract Skills & Stats from your Code to build your profile
 
-- Create an account in [modelteam](https://app.modelteam.ai/) if you don't have one
-- Run the following commands to generate your profile.
-    - Skill extraction runs locally on your machine via Ollama and does not send any data outside your machine.
-    - Generates PDF profile for your personal use and a JSON file for creating your modelteam.ai verified profile
+- Run the commands below to generate your profile. Skill extraction runs locally via Ollama and never leaves your
+  machine.
+- You'll get two artifacts:
+    - **`modelteam_profile.html`** — a standalone, publicly-hostable HTML profile. Open it in any browser, share it,
+      or host it on GitHub Pages.
+    - **`pdf/modelteam_profile.pdf`** — a PDF for your personal use (includes repo-level breakdowns; treat as
+      confidential).
 
 ### 1. Install modelteam Locally (in a virtual environment)
 
@@ -88,10 +92,12 @@ or
 python user_profile_helper.py
 ```
 
-### 3. Upload
-- Create an account in [modelteam](https://app.modelteam.ai/) if you don't have one
-- Upload the file(mt_metrics_yyyy-mm-dd_*****.json.gz) back to your [experience](https://app.modelteam.ai/experience)
-- Our AI models will analyze the data and generate a profile for you (<30 minutes)
+### 3. Open your HTML profile
+
+After the helper finishes, find the outputs in `model_team_profile/<git_email_id>/<date>/`:
+
+- `modelteam_profile.html` — open in any browser. Standalone, safe to host publicly.
+- `pdf/modelteam_profile.pdf` — personal PDF. Keep local; contains repo-level detail.
 
 </details>
 
@@ -215,7 +221,7 @@ python3 gen_git_stats.py -r /Users/john/repos/ -g 1234567+john@users.noreply.git
 - **To Force re-run the job, delete the folder `model_team_profile/<git_email_id>` and run the script again**
 
 
-### 4. Edit & Upload
+### 4. Edit Skills & Generate Outputs
 
 <details open>
   <summary><b>Mac/Linux</b></summary>
@@ -232,13 +238,13 @@ python edit_skills.py -g <git_email_id> [--cli_mode]
 ```
 
 </details>
-- Verify the generated skill stats file and edit it using [edit_skills.py](edit_skills.py) (Don't edit the JSON file
-  directly)
-    - Remove any confidential skills. Marking skills as irrelevant will help us improve our models
-- Create an account in [modelteam](https://app.modelteam.ai/) if you don't have one
-- Upload the file(mt_metrics_yyyy-mm-dd_*****.json.gz) back to your [experience](https://app.modelteam.ai/experience)
-- Our AI models will analyze the data and generate a profile for you (<30 minutes)
-- If you are using linux server without GUI, use --cli_mode
+
+- Verify and edit the predicted skills using [edit_skills.py](edit_skills.py) (don't edit the JSON file directly).
+    - Remove anything you don't want on your profile (e.g. confidential or irrelevant skills).
+- After saving, two artifacts are written to `model_team_profile/<git_email_id>/<date>/`:
+    - `modelteam_profile.html` — standalone HTML profile, publicly hostable. Open in any browser.
+    - `pdf/modelteam_profile.pdf` — personal PDF with repo-level breakdowns.
+- If you are using a Linux server without a GUI, pass `--cli_mode`.
 
 **Examples**
 
@@ -252,6 +258,17 @@ Linux
 
 ```
 python3 edit_skills.py -g 1234567+john@users.noreply.github.com --cli_mode
+```
+
+### 5. Re-render HTML without re-editing (optional)
+
+Once you've edited skills once, you can regenerate the HTML at any time from the filtered JSON without rerunning the
+filter dialog:
+
+```
+python3 -m modelteam_utils.html_report \
+    --profile_json model_team_profile/<git_email_id>/<date>/mt_stats_<date>.json \
+    --output_dir   model_team_profile/<git_email_id>/<date>/
 ```
 
 </details>

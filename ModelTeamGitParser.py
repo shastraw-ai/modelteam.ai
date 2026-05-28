@@ -11,7 +11,7 @@ import sys
 from tabulate import tabulate
 from tqdm import tqdm
 
-from modelteam_utils.ai_utils import check_ollama_ready, init_ollama, extract_skills_from_snippet
+from modelteam_utils.ai_utils import check_ollama_ready, init_ollama, extract_skills_from_snippet, check_if_refactor
 from modelteam_utils.constants import (ADDED, DELETED, TIME_SERIES, LANGS, LIBS, COMMITS, START_TIME, END_TIME,
                                        MIN_LINES_ADDED, SIGNIFICANT_CONTRIBUTION, REFORMAT_CHAR_LIMIT,
                                        TOO_BIG_TO_ANALYZE_LIMIT, TOO_BIG_TO_ANALYZE,
@@ -20,7 +20,7 @@ from modelteam_utils.constants import (ADDED, DELETED, TIME_SERIES, LANGS, LIBS,
                                        PROFILES, PHC, TIMESTAMP, TEAM, C2S, SS_LC)
 from modelteam_utils.constants import MT_PROFILE_JSON, PDF_STATS_JSON
 from modelteam_utils.crypto_utils import generate_hc
-from modelteam_utils.utils import break_code_snippets_to_chunks, filter_skills, yyyy_mm_to_quarter
+from modelteam_utils.utils import break_code_snippets_to_chunks, filter_skills, yyyy_mm_to_quarter, get_extension_to_language_map
 from modelteam_utils.utils import consistent_hash_code
 from modelteam_utils.utils import get_file_extension, run_commandline_command, timestamp_to_yyyy_mm, \
     get_num_chars_changed, get_language_parser
@@ -47,6 +47,7 @@ class ModelTeamGitParser:
         self.keep_only_public_libraries = True
         self.config = config
         self.pdf_stats = {}
+        self.model_data = None
 
     @staticmethod
     def add_to_time_series_stats(commits, file_extension, yyyy_mm, key, inc_count):
@@ -148,8 +149,18 @@ class ModelTeamGitParser:
                 total_added += added
                 total_deleted += deleted
             if is_huge_commit(total_added, total_deleted):
-                print(f"Huge (5K+ lines) commit detected. Ignoring {commit_hash}")
-                return file_line_stats
+                if self.model_data:
+                    summary_lines = [f"Commit adds {total_added} and deletes {total_deleted} lines across {len(parsed_stats)} files:"]
+                    for fp, fe, a, d in parsed_stats[:20]:
+                        summary_lines.append(f"  {fp}: +{a} -{d}")
+                    if not check_if_refactor(self.model_data, "\n".join(summary_lines)):
+                        print(f"Large commit {commit_hash} is NOT a refactor — processing", flush=True)
+                    else:
+                        print(f"Large refactor commit detected. Ignoring {commit_hash}", flush=True)
+                        return file_line_stats
+                else:
+                    print(f"Huge commit detected. Ignoring {commit_hash}", flush=True)
+                    return file_line_stats
             for file_path, file_extension, added, deleted in parsed_stats:
                 if file_extension not in user_commit_stats[LANGS]:
                     user_commit_stats[LANGS][file_extension] = {}
@@ -278,9 +289,17 @@ class ModelTeamGitParser:
             #     if library_names:
             #         labels[LIBS][file_name] = library_names
             if len(file_diff) > TOO_BIG_TO_ANALYZE_LIMIT:
-                # Any single file diff with more than 10000 chars changed is too big to analyze
-                self.add_to_time_series_stats(user_commit_stats, file_extension, yyyy_mm, TOO_BIG_TO_ANALYZE, 1)
-                continue
+                if self.model_data:
+                    sample = file_diff_content[:3000]
+                    desc = f"File: {file_name}\nDiff ({len(file_diff)} chars, showing first 3000):\n{sample}"
+                    if not check_if_refactor(self.model_data, desc):
+                        pass  # not a refactor — fall through to analysis
+                    else:
+                        self.add_to_time_series_stats(user_commit_stats, file_extension, yyyy_mm, TOO_BIG_TO_ANALYZE, 1)
+                        continue
+                else:
+                    self.add_to_time_series_stats(user_commit_stats, file_extension, yyyy_mm, TOO_BIG_TO_ANALYZE, 1)
+                    continue
             lines_added = file_line_stats[filename_with_path][0]
             lines_deleted = file_line_stats[filename_with_path][1]
             if lines_added < SIGNIFICANT_CONTRIBUTION_LINE_LIMIT:
@@ -300,13 +319,17 @@ class ModelTeamGitParser:
         snippets = self.get_newly_added_snippets(file_diff_content, labels)
         if snippets:
             self.add_to_time_series_stats(commits, file_extension, yyyy_mm, SIGNIFICANT_CONTRIBUTION, len(snippets))
+            diff_lines = file_diff_content.split('\n')
+            added_lines = [line[1:] for line in diff_lines if line.startswith('+')]
+            parser = get_language_parser(file_extension, None, file_name, self.keep_only_public_libraries)
+            file_imports = parser.extract_imports(added_lines) if parser else []
             if file_extension not in commits[LANGS]:
                 commits[LANGS][file_extension] = {}
             if SIG_CODE_SNIPPETS not in commits[LANGS][file_extension]:
                 commits[LANGS][file_extension][SIG_CODE_SNIPPETS] = {}
             if yyyy_mm not in commits[LANGS][file_extension][SIG_CODE_SNIPPETS]:
                 commits[LANGS][file_extension][SIG_CODE_SNIPPETS][yyyy_mm] = []
-            commits[LANGS][file_extension][SIG_CODE_SNIPPETS][yyyy_mm].append((file_name, snippets))
+            commits[LANGS][file_extension][SIG_CODE_SNIPPETS][yyyy_mm].append((file_name, snippets, file_imports))
 
     def deep_analysis_of_a_commit(self, repo_path, commit_hash, file_line_stats, user_commit_stats, labels, yyyy_mm,
                                   curr_user):
@@ -331,12 +354,18 @@ class ModelTeamGitParser:
         file_list_with_sig_change = self.update_line_num_stats(repo_path, commit_hash, user_commit_stats, yyyy_mm,
                                                                curr_user)
         if file_list_with_sig_change:
-            # check if total lines added is < 5000 in all the files
-            total_lines_added = 0
-            for file in file_list_with_sig_change.keys():
-                total_lines_added += file_list_with_sig_change[file][0]
-            if total_lines_added < MAX_DIFF_SIZE:
-                # Any single commit with more than 5000 lines changed is too big to analyze
+            total_lines_added = sum(stats[0] for stats in file_list_with_sig_change.values())
+            should_analyze = total_lines_added < MAX_DIFF_SIZE
+            if not should_analyze and self.model_data:
+                summary_lines = [f"Commit adds {total_lines_added} lines across {len(file_list_with_sig_change)} files:"]
+                for fp, stats in list(file_list_with_sig_change.items())[:20]:
+                    summary_lines.append(f"  {os.path.basename(fp)}: +{stats[0]} -{stats[1]}")
+                should_analyze = not check_if_refactor(self.model_data, "\n".join(summary_lines))
+                if should_analyze:
+                    print(f"Large commit {commit_hash} is NOT a refactor — processing", flush=True)
+                else:
+                    print(f"Large refactor commit {commit_hash} — skipping deep analysis", flush=True)
+            if should_analyze:
                 self.deep_analysis_of_a_commit(repo_path, commit_hash, file_list_with_sig_change, user_commit_stats,
                                                labels, yyyy_mm, curr_user)
 
@@ -363,6 +392,8 @@ class ModelTeamGitParser:
 
     def process_single_repo(self, repo_path, user_stats_output_file_name, repo_lib_output_file_name,
                             final_output, min_months, usernames, num_months):
+        if not args.skip_model_eval and self.model_data is None and check_ollama_ready(self.config):
+            self.model_data = init_ollama(self.config)
         user_profiles = {}
         repo_level_data = {LIBS: {}, SKILLS: {}, SS_LC: 0}
         if not os.path.exists(user_stats_output_file_name):
@@ -388,11 +419,13 @@ class ModelTeamGitParser:
                             repo_path = user_stats[REPO_PATH]
                             if USER in user_stats and self.is_allowed_user(repo_name, user_stats[USER]):
                                 user_profiles[user_stats[USER]] = user_stats[STATS]
-                if not check_ollama_ready(self.config):
-                    print("ERROR: Ollama is not running or model not available.", flush=True)
-                    print("Please install Ollama (https://ollama.com) and pull the configured model.", flush=True)
-                    return
-                model_data = init_ollama(self.config)
+                if self.model_data is None:
+                    if not check_ollama_ready(self.config):
+                        print("ERROR: Ollama is not running or model not available.", flush=True)
+                        print("Please install Ollama (https://ollama.com) and pull the configured model.", flush=True)
+                        return
+                    self.model_data = init_ollama(self.config)
+                model_data = self.model_data
                 model_label = f"Skill Prediction@{repo_name}"
                 has_new_data = self.extract_skills(user_profiles, repo_level_data, min_months,
                                                     model_data, repo_name, model_label)
@@ -439,6 +472,8 @@ class ModelTeamGitParser:
             total = repo_level_data[SS_LC]
             if total and total > 0:
                 pbar = tqdm(total=total, desc=model_label, unit="lines")
+        ext_to_lang = get_extension_to_language_map()
+        chunk_limit = model_data.get("chunk_char_limit", CHUNK_CHAR_LIMIT)
         for user in user_profiles:
             user_profile = user_profiles[user]
             if SKILLS not in user_profile:
@@ -448,7 +483,6 @@ class ModelTeamGitParser:
             if LANGS not in user_profile:
                 return 0
             lang_stats = user_profile[LANGS]
-            # lang, file_name, yyyy_mm, snippet, libs_added, line_count, doc_string_line_count
             for lang in lang_stats:
                 if SIG_CODE_SNIPPETS not in lang_stats[lang]:
                     continue
@@ -459,34 +493,45 @@ class ModelTeamGitParser:
                     user_profile[TMP_MAX_YYYY_MM] = max(user_profile[TMP_MAX_YYYY_MM], num_months)
                 if TIME_SERIES not in lang_stats[lang] or num_months < min_months:
                     continue
+                lang_name = ext_to_lang.get(lang, lang)
                 sig_code_snippets = lang_stats[lang][SIG_CODE_SNIPPETS]
                 for yyyy_mm in sig_code_snippets.keys():
                     monthly_snippets = sig_code_snippets[yyyy_mm]
                     for i in range(len(monthly_snippets)):
-                        snippets = monthly_snippets[i]
-                        file_name = snippets[0]
-                        snippet_list = snippets[1]
-                        for snippet in snippet_list:
-                            file_extension = get_file_extension(file_name)
-                            parser = get_language_parser(file_extension, snippet, file_name,
-                                                         self.keep_only_public_libraries)
-                            if not parser:
-                                continue
-                            chunks = break_code_snippets_to_chunks(file_name, snippet, CHUNK_CHAR_LIMIT)
+                        entry = monthly_snippets[i]
+                        file_name = entry[0]
+                        snippet_list = entry[1]
+                        file_imports = entry[2] if len(entry) > 2 else []
+
+                        combined_code = "\n# ---\n".join(snippet_list)
+                        total_lines = sum(len(s.split("\n")) for s in snippet_list)
+
+                        if len(combined_code) <= chunk_limit:
+                            features.append({
+                                "user": user, "lang": lang, "lang_name": lang_name,
+                                "file_name": file_name, "yyyy_mm": yyyy_mm,
+                                "snippet": combined_code, "line_count": total_lines,
+                                "imports": file_imports
+                            })
+                        else:
+                            chunks = break_code_snippets_to_chunks(file_name, combined_code, chunk_limit)
                             for chunk in chunks:
-                                lines = chunk.split("\n")
-                                line_count = len(lines)
-                                features.append({"user": user, "lang": lang, "file_name": file_name, "yyyy_mm": yyyy_mm,
-                                                 "snippet": chunk, "line_count": line_count})
-                                if len(features) == args.batch_size:
-                                    self.eval_llm_model(model_data, features, user_profiles, pbar)
-                                    has_features += len(features)
-                                    features = []
+                                line_count = len(chunk.split("\n"))
+                                features.append({
+                                    "user": user, "lang": lang, "lang_name": lang_name,
+                                    "file_name": file_name, "yyyy_mm": yyyy_mm,
+                                    "snippet": chunk, "line_count": line_count,
+                                    "imports": file_imports
+                                })
+
+                        if len(features) >= args.batch_size:
+                            self.eval_llm_model(model_data, features, user_profiles, pbar)
+                            has_features += len(features)
+                            features = []
         if len(features) > 0:
             self.eval_llm_model(model_data, features, user_profiles, pbar)
             has_features += len(features)
         if pbar:
-            # some lines get reduced while breaking into chunks
             if pbar.total and pbar.total > pbar.n:
                 pbar.update(pbar.total - pbar.n)
             pbar.close()
@@ -495,7 +540,12 @@ class ModelTeamGitParser:
     def eval_llm_model(self, model_data, features, user_profiles, pbar):
         for i in range(len(features)):
             snippet = features[i]["snippet"]
-            skills = extract_skills_from_snippet(model_data, snippet)
+            skills = extract_skills_from_snippet(
+                model_data, snippet,
+                file_name=features[i].get("file_name", ""),
+                lang=features[i].get("lang_name", ""),
+                imports=features[i].get("imports", [])
+            )
             lang = features[i]["lang"]
             yyyy_mm = features[i]["yyyy_mm"]
             line_count = features[i]["line_count"]

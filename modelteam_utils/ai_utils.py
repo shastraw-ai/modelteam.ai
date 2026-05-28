@@ -2,15 +2,25 @@ import json
 
 import requests
 
-from .constants import OLLAMA_DEFAULT_ENDPOINT, OLLAMA_DEFAULT_MODEL, SKILL_PREDICTION_LIMIT
-from .utils import load_skill_config, get_edit_distance
+from .constants import OLLAMA_DEFAULT_ENDPOINT, OLLAMA_DEFAULT_MODEL, SKILL_PREDICTION_LIMIT, CHUNK_CHAR_LIMIT
 
 SYSTEM_PROMPT = (
-    "You are a code analysis expert. Given a code snippet, identify the technical skills, "
-    "frameworks, libraries, and concepts demonstrated. Return ONLY a JSON object with a single key "
-    "'skills' containing an array of skill name strings. Each skill should be a concise, "
-    "specific technical term (e.g., 'React', 'API Development', 'Unit Testing'). "
-    "Return at most 10 skills. No explanations."
+    "You are a code skill extractor. Given code with file metadata, identify the specific "
+    "technical skills demonstrated.\n\n"
+    "RULES:\n"
+    "1. Return specific, named technologies: frameworks, libraries, platforms, tools, "
+    "concrete disciplines.\n"
+    "   GOOD: \"React\", \"FastAPI\", \"Docker\", \"PostgreSQL\", \"pandas\", \"Machine Learning\", "
+    "\"Authentication\", \"WebSocket\", \"GraphQL\"\n"
+    "   BAD: \"Error Handling\", \"Data Processing\", \"Web Development\", \"API Design\", "
+    "\"Object-Oriented Programming\", \"Asynchronous Programming\", \"Code Quality\"\n"
+    "2. Map imports and usage patterns to the framework/library name.\n"
+    "   e.g., \"import pandas\" or \"pd.DataFrame\" -> \"pandas\"\n"
+    "   e.g., \"useEffect\", \"useState\" -> \"React\"\n"
+    "3. Do NOT return the programming language itself as a skill.\n"
+    "4. Use standard capitalization (e.g., \"FastAPI\" not \"fastapi\", \"NumPy\" not \"numpy\").\n"
+    "5. Return at most {limit} skills.\n"
+    "6. Return ONLY JSON: {{\"skills\": [\"Skill1\", \"Skill2\"]}}"
 )
 
 
@@ -31,32 +41,49 @@ def check_ollama_ready(config):
 def init_ollama(config):
     endpoint = config.get("ollama", "endpoint", fallback=OLLAMA_DEFAULT_ENDPOINT)
     model = config.get("ollama", "model", fallback=OLLAMA_DEFAULT_MODEL)
-    skill_list_file = config["modelteam.ai"]["skill_list"]
-    canonical_skills = load_skill_config(skill_list_file, only_keys=True, return_set=False)
-    canonical_skills_lower = {}
-    for s in canonical_skills:
-        canonical_skills_lower[s.lower()] = s
+    chunk_char_limit = int(config.get("ollama", "chunk_char_limit", fallback=str(CHUNK_CHAR_LIMIT)))
+    num_predict = int(config.get("ollama", "num_predict", fallback="1024"))
+    system_prompt = SYSTEM_PROMPT.format(limit=SKILL_PREDICTION_LIMIT)
     return {
         "endpoint": endpoint,
         "model": model,
         "model_tag": f"c2s::{model}",
-        "canonical_skills": canonical_skills,
-        "canonical_skills_lower": canonical_skills_lower,
+        "chunk_char_limit": chunk_char_limit,
+        "num_predict": num_predict,
+        "system_prompt": system_prompt,
     }
 
 
-def extract_skills_from_snippet(model_data, code_snippet):
+def extract_skills_from_snippet(model_data, code_snippet, file_name="", lang="", imports=None):
     url = f"{model_data['endpoint']}/api/chat"
+
+    context_parts = []
+    if lang:
+        context_parts.append(f"Language: {lang}")
+    if file_name:
+        context_parts.append(f"File: {file_name}")
+    if imports:
+        context_parts.append(f"Imports: {', '.join(imports[:30])}")
+
+    context_header = "\n".join(context_parts)
+    if context_header:
+        user_content = f"{context_header}\n\nCode:\n```\n{code_snippet}\n```"
+    else:
+        user_content = f"Code:\n```\n{code_snippet}\n```"
+
     payload = {
         "model": model_data["model"],
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Analyze this code and extract skills:\n```\n{code_snippet}\n```"}
+            {"role": "system", "content": model_data["system_prompt"]},
+            {"role": "user", "content": user_content}
         ],
         "stream": False,
         "format": "json",
         "think": False,
-        "options": {"temperature": 0.1, "num_predict": 256}
+        "options": {
+            "temperature": 0.1,
+            "num_predict": model_data.get("num_predict", 1024)
+        }
     }
     try:
         resp = requests.post(url, json=payload, timeout=120)
@@ -69,44 +96,62 @@ def extract_skills_from_snippet(model_data, code_snippet):
             raw_skills = parsed
         else:
             return []
-        return normalize_skill_names(raw_skills, model_data)[:SKILL_PREDICTION_LIMIT]
+        return normalize_skill_names(raw_skills)[:SKILL_PREDICTION_LIMIT]
     except Exception as e:
         print(f"Ollama inference error: {e}", flush=True)
         return []
 
 
-def normalize_skill_names(raw_skills, model_data):
+REFACTOR_CHECK_PROMPT = (
+    "You classify code changes. Given a description of a large code change, "
+    "determine if it is primarily:\n"
+    "- REFACTOR: code reformatting, style/lint fixes, auto-formatter output, "
+    "whitespace cleanup, renaming, moving code between files, import reordering, "
+    "generated/vendored file updates\n"
+    "- CONTRIBUTION: new features, bug fixes, new APIs, significant logic changes, "
+    "new tests, new modules, meaningful refactors that change architecture\n\n"
+    "Return ONLY JSON: {\"classification\": \"REFACTOR\" or \"CONTRIBUTION\"}"
+)
+
+
+def check_if_refactor(model_data, description):
+    """Ask the LLM whether a large code change is a refactor.
+
+    Returns True if the change appears to be a refactor/reformatting.
+    Defaults to False (not a refactor) on error — err on the side of processing.
+    """
+    url = f"{model_data['endpoint']}/api/chat"
+    payload = {
+        "model": model_data["model"],
+        "messages": [
+            {"role": "system", "content": REFACTOR_CHECK_PROMPT},
+            {"role": "user", "content": description},
+        ],
+        "stream": False,
+        "format": "json",
+        "think": False,
+        "options": {"temperature": 0.0, "num_predict": 64},
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=60)
+        resp.raise_for_status()
+        content = resp.json()["message"]["content"]
+        parsed = json.loads(content)
+        classification = parsed.get("classification", "").upper()
+        return classification == "REFACTOR"
+    except Exception:
+        return False
+
+
+def normalize_skill_names(raw_skills):
     normalized = []
     seen = set()
-    canonical_lower = model_data["canonical_skills_lower"]
-
     for skill in raw_skills:
         if not isinstance(skill, str) or not skill.strip():
             continue
-        s = skill.strip().lower()
-        # exact match to canonical
-        if s in canonical_lower:
-            canon = canonical_lower[s]
-            if canon not in seen:
-                normalized.append(canon)
-                seen.add(canon)
-            continue
-        # fuzzy match — edit distance <= 1 for most strings, <= 2 only for long ones
-        best_match = None
-        max_dist = 2 if len(s) > 15 else 1
-        best_dist = max_dist + 1
-        if len(s) > 4:
-            for canon_lower, canon in canonical_lower.items():
-                if abs(len(s) - len(canon_lower)) > max_dist:
-                    continue
-                dist = get_edit_distance(s, canon_lower)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_match = canon
-        if best_match and best_match not in seen:
-            normalized.append(best_match)
-            seen.add(best_match)
-        elif s not in seen:
-            normalized.append(skill.strip())
-            seen.add(s)
+        s = skill.strip()
+        key = s.lower()
+        if key not in seen:
+            normalized.append(s)
+            seen.add(key)
     return normalized

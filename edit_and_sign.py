@@ -11,13 +11,14 @@ from PyQt5.QtWidgets import (QWidget, QLabel, QRadioButton, QVBoxLayout, QHBoxLa
                              QPushButton, QButtonGroup, QMessageBox, QFrame, QApplication, QTextBrowser, QTextEdit,
                              QCheckBox)
 
-from modelteam_utils.constants import USER, REPO, STATS, SKILLS, RELEVANT, NOT_RELEVANT, TOP_SECRET, PROFILES, \
+from modelteam_utils.ai_utils import check_ollama_ready, init_ollama
+from modelteam_utils.constants import USER, REPO, STATS, SKILLS, RELEVANT, NOT_RELEVANT, PROFILES, \
     NR_SKILLS, TIMESTAMP, MT_PROFILE_JSON, PDF_STATS_JSON
-from modelteam_utils.crypto_utils import compress_file, generate_hc
 from modelteam_utils.html_report import generate_html_report
+from modelteam_utils.md_report import generate_md_report
 from modelteam_utils.qt_style import APP_STYLESHEET
-from modelteam_utils.utils import filter_skills, sha256_hash, load_skill_config
-from modelteam_utils.utils import trunc_string
+from modelteam_utils.skill_filter import CACHE_FILENAME, filter_profile_skills
+from modelteam_utils.utils import filter_skills, load_skill_config, trunc_string
 from modelteam_utils.viz_utils import generate_pdf_report
 
 display_names = {}
@@ -81,12 +82,11 @@ class App(QWidget):
             f"""<html><body style="color:#e6edf3;">
 <p style="font-size:12.5px; line-height:1.6; margin:0 0 8px 0;">
 These are the skills our models predicted after analyzing your code contributions.
-On the server side they will be scored further by another model.
+Pick which ones belong on your HTML profile.
 </p>
 <p style="font-size:12.5px; line-height:1.7; margin:0 0 8px 0;">
 <span style="color:#a855f7;"><b>Relevant</b></span> — keep on profile.<br>
-<span style="color:#06b6d4;"><b>Not Relevant</b></span> — drop from server profile (feedback to the model).<br>
-<span style="color:#ef4444;"><b>Top Secret</b></span> — never even send to the server.
+<span style="color:#06b6d4;"><b>Not Relevant</b></span> — remove from profile.
 </p>
 <p style="font-size:12.5px; margin:0;">
 <span style="color:#8b949e;">Repos analyzed: {self.repocsv}</span>
@@ -123,7 +123,7 @@ On the server side they will be scored further by another model.
 <ul style="font-size:12.5px; margin:0 0 0 16px; padding:0;">
 <li>I am the owner of the id <span style="color:#06b6d4;">{self.email}</span> associated with this profile.</li>
 <li>I own the code contributions associated with this id.</li>
-<li>I will remove any confidential skills from the profile in this step before uploading.</li>
+<li>I will remove any confidential skills from the profile in this step.</li>
 </ul>
 </body></html>"""
         self.t_n_c_label = QTextBrowser()
@@ -164,7 +164,7 @@ On the server side they will be scored further by another model.
         )
         label.setFixedWidth(220)
         frame_layout.addWidget(label)
-        for name in [RELEVANT, NOT_RELEVANT, TOP_SECRET]:
+        for name in [RELEVANT, NOT_RELEVANT]:
             header_layout = QHBoxLayout()
             header_layout.setAlignment(Qt.AlignCenter)
             header_label = QLabel(name.upper())
@@ -188,12 +188,14 @@ On the server side they will be scored further by another model.
         frame_layout.addWidget(label)
 
         button_group = QButtonGroup()
-        for name in [RELEVANT, NOT_RELEVANT, TOP_SECRET]:
+        # Fall back to Relevant if def_enabled is an unknown / legacy value (e.g. "Top Secret").
+        normalized_default = def_enabled if def_enabled in (RELEVANT, NOT_RELEVANT) else RELEVANT
+        for name in [RELEVANT, NOT_RELEVANT]:
             radio_layout = QHBoxLayout()
             radio_layout.setAlignment(Qt.AlignCenter)
             radio = QRadioButton()
             radio.setAccessibleName(name)
-            if name == def_enabled:
+            if name == normalized_default:
                 radio.setChecked(True)
             button_group.addButton(radio)
             radio_layout.addWidget(radio)
@@ -214,7 +216,7 @@ On the server side they will be scored further by another model.
         self.close()
 
 
-def edit_profile(merged_profile, choices_file, cli_mode):
+def edit_profile(merged_profile, choices_file, cli_mode, model_data=None, cache_path=None):
     repos = []
     skills = {}
     email = merged_profile[USER]
@@ -222,13 +224,32 @@ def edit_profile(merged_profile, choices_file, cli_mode):
         repos.append(profile[REPO])
         for skill in profile[STATS][SKILLS].keys():
             skills[skill] = skills.get(skill, 0) + profile[STATS][SKILLS][skill]
+    print(f"Found {len(skills)} predicted skills across {len(repos)} repos.", flush=True)
+
+    pre_filter_drops = set()
+    canonical_map = {}
+    if model_data:
+        lang_drops, llm_drops, canonical_map, surviving_scores = filter_profile_skills(
+            skills, model_data, cache_path
+        )
+        pre_filter_drops = lang_drops | llm_drops
+        skills = surviving_scores
+        print(f"  Dropped {len(lang_drops)} language names "
+              f"and {len(llm_drops)} non-marketable skills; "
+              f"merged into {len(skills)} canonical skills.", flush=True)
+    else:
+        print("  Ollama not reachable — skipping LLM relevance filter.", flush=True)
+
+    if not skills:
+        print("No skills survived filtering. Nothing to edit.", flush=True)
+        return 0, list(pre_filter_drops), canonical_map
+
     avg_count = sum(skills.values()) / len(skills)
     threshold = 0.2 * avg_count
-    bad_skills = [skill for skill in skills if skills[skill] < threshold]
-    # print("Average count: ", avg_count, flush=True)
-    # print("Bad skills: ", bad_skills, flush=True)
-    for s in bad_skills:
+    threshold_bad = [skill for skill in skills if skills[skill] < threshold]
+    for s in threshold_bad:
         del skills[s]
+    bad_skills = list(pre_filter_drops) + threshold_bad
     skill_list = sorted(skills.keys(), key=lambda x: skills[x], reverse=True)
     if not os.path.exists(choices_file):
         # mark bottom 30% as not relevant and others as relevant
@@ -236,102 +257,65 @@ def edit_profile(merged_profile, choices_file, cli_mode):
     else:
         with open(choices_file, 'r') as f:
             default_choices = json.load(f)
+        # Back-compat: older choices files may contain "Top Secret" (now merged into Not Relevant).
+        default_choices = {k: (NOT_RELEVANT if v == "Top Secret" else v) for k, v in default_choices.items()}
     if cli_mode:
         if display_t_and_c(merged_profile[USER]) != "y":
             print("Please accept the terms and conditions to proceed.")
             sys.exit(0)
         cli_choices(choices_file, email, repos, skill_list, default_choices)
-        return 0, bad_skills
+        return 0, bad_skills, canonical_map
     else:
         app = QApplication(sys.argv)
         app.setStyleSheet(APP_STYLESHEET)
         ex = App(email, ",".join(repos), skill_list, choices_file, default_choices)
-        return app.exec_(), bad_skills
+        return app.exec_(), bad_skills, canonical_map
 
 
 def cli_choices(choices_file, email, repos, skills, choices_dict):
-    # ANSI escape codes for text formatting
     RESET = '\033[0m'
     BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
-    RED = '\033[31m'
 
     print(f"Email: {BOLD}{email}{RESET}")
     print(f"Repos: {', '.join(repos)}")
     print(f"Total Skills: {BOLD}{len(skills)}{RESET}")
-    print("These are the skills that our models predicted after analyzing your code contributions.")
-    print("These skills will further be scored by another model on the server side.")
+    print("These are the skills our models predicted after analyzing your code contributions.")
+    print("Pick which ones belong on your HTML profile.")
     print('\n')
 
-    # Display the list of skills in 3 columns
     display_skills(BOLD, RESET, skills, choices_dict)
 
-    # Initialize choices_dict with all skills marked as RELEVANT
-    # choices_dict = {skill: RELEVANT for skill in skills}
-
-    # Loop to get user confirmation
-    print("Please select the skills you wish to remove or mark differently.\n")
     print("Options:")
-    print(f"{BOLD}Relevant{RESET}: Keep the skill in your profile.")
-    print(f"{BOLD}Not Relevant{RESET}: Mark as not relevant and {BOLD}remove{RESET} from profile on the server.")
-    print(f"{BOLD}Top Secret{RESET}: Remove from profile and {BOLD}DON'T{RESET} even send it to the server.\n")
+    print(f"{BOLD}Relevant{RESET}: Keep the skill on your profile.")
+    print(f"{BOLD}Not Relevant{RESET}: Remove the skill from your profile.\n")
     while True:
-        # Ask the user to enter the numbers of skills to mark as 'Relevant'
         relevant_input = input(
-            f"\nEnter the numbers of skills to change to {BOLD}Relevant{RESET} (separated by commas):\n")
-        if relevant_input.strip():
-            relevant_numbers = set(int(num.strip()) for num in relevant_input.split(',') if num.strip().isdigit())
-        else:
-            relevant_numbers = set()
-        # Ask the user to enter the numbers of skills to mark as 'Not Relevant'
+            f"\nEnter the numbers of skills to change to {BOLD}Relevant{RESET} (separated by commas, or press Enter to skip):\n")
+        relevant_numbers = set(int(n.strip()) for n in relevant_input.split(',') if n.strip().isdigit())
+
         not_relevant_input = input(
             f"\nEnter the numbers of skills to change to {BOLD}Not Relevant{RESET} (separated by commas, or press Enter to skip):\n")
-        if not_relevant_input.strip():
-            not_relevant_numbers = set(
-                int(num.strip()) for num in not_relevant_input.split(',') if num.strip().isdigit())
-        else:
-            not_relevant_numbers = set()
-
-        # Ask the user to enter the numbers of skills to mark as 'Top Secret'
-        top_secret_input = input(
-            f"\nEnter the numbers of skills to mark as {BOLD}Top Secret{RESET} (separated by commas, or press Enter to skip):\n")
-        if top_secret_input.strip():
-            top_secret_numbers = set(int(num.strip()) for num in top_secret_input.split(',') if num.strip().isdigit())
-        else:
-            top_secret_numbers = set()
+        not_relevant_numbers = set(int(n.strip()) for n in not_relevant_input.split(',') if n.strip().isdigit())
 
         for num in relevant_numbers:
             if 1 <= num <= len(skills):
-                skill = skills[num - 1]
-                choices_dict[skill] = RELEVANT
+                choices_dict[skills[num - 1]] = RELEVANT
             else:
                 print(f"Invalid skill number: {num}")
 
         for num in not_relevant_numbers:
             if 1 <= num <= len(skills):
-                skill = skills[num - 1]
-                choices_dict[skill] = NOT_RELEVANT
+                choices_dict[skills[num - 1]] = NOT_RELEVANT
             else:
                 print(f"Invalid skill number: {num}")
 
-        for num in top_secret_numbers:
-            if 1 <= num <= len(skills):
-                skill = skills[num - 1]
-                choices_dict[skill] = TOP_SECRET
-            else:
-                print(f"Invalid skill number: {num}")
-
-        # Confirmation of skills marked for removal
         print("\nUpdated Status:")
         display_skills(BOLD, RESET, skills, choices_dict)
-        # Ask user to confirm or re-enter selections
         confirmation = input("\nAre you satisfied with these selections? (yes/no):\n").strip().lower()
         if confirmation in ['yes', 'y']:
             break
-        else:
-            print("\nLet's try again.")
+        print("\nLet's try again.")
 
-    # Save the choices to the file
     with open(choices_file, 'w') as f:
         json.dump(choices_dict, f)
 
@@ -347,12 +331,7 @@ def display_skills(BOLD, RESET, skills, choices):
         column_index = idx % number_of_columns
         skill_number = idx + 1
         ch = choices.get(skill, RELEVANT)
-        if ch == NOT_RELEVANT:
-            ch = "NR"
-        elif ch == TOP_SECRET:
-            ch = "TS"
-        else:
-            ch = "R"
+        ch = "NR" if ch == NOT_RELEVANT else "R"
         display_name = f"{BOLD}{skill_number}{RESET}. {trunc_string(get_skill_display_name(skill), 40)} ({ch})"
         columns[column_index].append(display_name)
     # Pad columns to have equal length
@@ -367,18 +346,50 @@ def display_skills(BOLD, RESET, skills, choices):
         print()
 
 
-def apply_choices(merged_profile, choices_file, edited_file, bad_skills):
+def _apply_canonical_map(stats, canonical_map):
+    """Rename skill keys per canonical_map across stats[skills] and the per-month c2s blocks."""
+    new_skills = {}
+    for s, v in stats.get(SKILLS, {}).items():
+        canon = canonical_map.get(s, s)
+        new_skills[canon] = new_skills.get(canon, 0) + v
+    stats[SKILLS] = new_skills
+
+    for lang_block in (stats.get("langs", {}) or {}).values():
+        time_series = (lang_block or {}).get("yyyymm", {}) or {}
+        for month_data in time_series.values():
+            if not isinstance(month_data, dict):
+                continue
+            for key, val in list(month_data.items()):
+                if not key.startswith("c2s::") or not isinstance(val, dict):
+                    continue
+                new_c2s = {}
+                for s, entry in val.items():
+                    canon = canonical_map.get(s, s)
+                    if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                        continue
+                    if canon in new_c2s:
+                        new_c2s[canon] = [new_c2s[canon][0] + entry[0],
+                                          new_c2s[canon][1] + entry[1]]
+                    else:
+                        new_c2s[canon] = [entry[0], entry[1]]
+                month_data[key] = new_c2s
+
+
+def apply_choices(merged_profile, choices_file, edited_file, bad_skills, canonical_map=None):
     utc_now = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
     with open(edited_file, "w") as f2:
         with open(choices_file, 'r') as f3:
             choices_dict = json.load(f3)
-        non_relevant_skills = [skill for skill in choices_dict if choices_dict[skill] == NOT_RELEVANT]
-        top_secret_set = {skill for skill in choices_dict if choices_dict[skill] == TOP_SECRET}
-        skills_to_remove = top_secret_set.union(bad_skills)
+        not_relevant = {s for s, c in choices_dict.items() if c == NOT_RELEVANT}
+        skills_to_remove = set(bad_skills)
         for profile in merged_profile[PROFILES]:
-            stats = profile[STATS]
-            filter_skills(stats, 0, skills_to_remove)
-            profile[NR_SKILLS] = non_relevant_skills
+            filter_skills(profile[STATS], 0, skills_to_remove)
+            if canonical_map:
+                _apply_canonical_map(profile[STATS], canonical_map)
+            # Choices use canonical names; remove any selected as Not Relevant.
+            if not_relevant:
+                filter_skills(profile[STATS], 0, not_relevant)
+            profile[NR_SKILLS] = []
             profile[TIMESTAMP] = utc_now
         merged_profile[TIMESTAMP] = utc_now
         f2.write(json.dumps(merged_profile, indent=2))
@@ -388,49 +399,29 @@ def display_t_and_c(email_id):
     t_and_c = ["\nI certify that,",
                f"\t1. I am the owner of the id {email_id} associated with this profile",
                "\t2. I own the code contributions associated with this id",
-               "\t3. I will remove any confidential skills from the profile in this step before uploading"]
+               "\t3. I will remove any confidential skills from the profile in this step"]
     res = input("\n".join(t_and_c) + "\nEnter \"Y\" to proceed: \n")
     return res.lower()
 
 
-def print_file_tree(currentDir, fullPath):
-    relative_path = os.path.relpath(fullPath, currentDir)
-    parts = relative_path.split(os.sep)
-    print(currentDir)
-    for i, part in enumerate(parts):
-        prefix = "   ├── " if i < len(parts) - 1 else "   └── "
-        print("   " * i + prefix + part)
-
-
-def print_message(pdf_file, html_file, final_output_file):
-    star_line = "*" * 80
-    blue_text = "\033[94m"
-    reset_text = "\033[0m"
-
+def print_message(pdf_file, html_file, md_file=None):
     print("📄 PDF Report Generated!")
-    print("⚠️ This is for your personal use only and is NOT needed by modelteam.ai.")
     print(f"📂 Saved at: {pdf_file}")
     print()
     print("🌐 HTML Profile Generated!")
     print("✅ Safe to host publicly — contains no repo names, file paths, or commit messages.")
     print(f"📂 Saved at: {html_file}")
     print(f"   Open in browser: file://{os.path.abspath(html_file)}")
-    print()
-    print(star_line)
-    print(f"📂 \033[1mFinal Output:\033[0m{final_output_file}")
-    print_file_tree(os.getcwd(), final_output_file)
-    print("🔹 Please note:")
-    print(
-        "The final profile will be generated on the server-side using another ML model that processes the JSON file you upload.")
-    print(f"🚀 \033[1;91m\033[1mDon't forget to upload the file:\033[0m")
-    print(f"🔗 {blue_text}https://app.modelteam.ai/experience{reset_text}")
-    print(star_line)
+    if md_file:
+        print()
+        print("📝 GitHub Profile README Generated!")
+        print(f"📂 Saved at: {md_file}")
+        print("   Copy to your GitHub profile repo (username/username) as README.md")
 
 
 if __name__ == "__main__":
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument("--profile_path", type=str, required=True)
-    arg_parser.add_argument("--user_key", type=str, required=True)
     arg_parser.add_argument("--cli_mode", action="store_true", default=False)
     arg_parser.add_argument("--config", type=str, required=False, default="config.ini")
 
@@ -443,23 +434,29 @@ if __name__ == "__main__":
     config_file = args.config
     config = configparser.ConfigParser()
     config.read(config_file)
-    skill_list = config["modelteam.ai"]["skill_list"]
-    display_names = load_skill_config(skill_list, only_keys=False)
+    skill_list_path = config["modelteam.ai"].get("skill_list", "")
+    if skill_list_path and os.path.exists(skill_list_path):
+        display_names = load_skill_config(skill_list_path, only_keys=False)
+    else:
+        display_names = {}
     with open(profile_json, "r") as f:
         merged_profile = json.load(f)
-    result, bad_skills = edit_profile(merged_profile, choices_file, args.cli_mode)
+    model_data = init_ollama(config) if check_ollama_ready(config) else None
+    cache_path = os.path.join(args.profile_path, CACHE_FILENAME)
+    result, bad_skills, canonical_map = edit_profile(
+        merged_profile, choices_file, args.cli_mode,
+        model_data=model_data, cache_path=cache_path,
+    )
     if result == 0 and os.path.exists(choices_file):
         print("Changes were saved. Applying changes...")
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         edited_file = os.path.join(args.profile_path, f"mt_stats_{today}.json")
         print(f"Edited file: {edited_file}")
-        apply_choices(merged_profile, choices_file, edited_file, bad_skills)
-        hc = sha256_hash(generate_hc(edited_file) + args.user_key)
-        final_output_file = os.path.join(args.profile_path, f"mt_stats_{today}_{hc}.json.gz")
-        compress_file(edited_file, final_output_file)
+        apply_choices(merged_profile, choices_file, edited_file, bad_skills, canonical_map)
         pdf_file = generate_pdf_report(edited_file, pdf_stats_json, pdf_path)
         html_file = generate_html_report(edited_file, args.profile_path)
-        print_message(pdf_file, html_file, final_output_file)
+        md_file = generate_md_report(edited_file, args.profile_path)
+        print_message(pdf_file, html_file, md_file)
     else:
         print("Changes were NOT SAVED. Exiting... Please run the script again.")
         sys.exit(0)

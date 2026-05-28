@@ -273,6 +273,6 @@ if __name__ == '__main__':
         with open(profile_path_file, "w") as f:
             f.write(output_path)
         if output_path:
-            run_edit_and_sign(output_path, selected_author, False, False)
+            run_edit_and_sign(output_path, False, False)
     else:
         print("Dialog closed... error")
