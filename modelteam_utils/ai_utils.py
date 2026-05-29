@@ -5,23 +5,100 @@ import requests
 from .constants import OLLAMA_DEFAULT_ENDPOINT, OLLAMA_DEFAULT_MODEL, SKILL_PREDICTION_LIMIT, CHUNK_CHAR_LIMIT
 
 SYSTEM_PROMPT = (
-    "You are a code skill extractor. Given code with file metadata, identify the specific "
-    "technical skills demonstrated.\n\n"
+    "You are a code skill extractor. Given code snippets with file metadata, identify the "
+    "specific technical skills demonstrated.\n\n"
     "RULES:\n"
     "1. Return specific, named technologies: frameworks, libraries, platforms, tools, "
-    "concrete disciplines.\n"
-    "   GOOD: \"React\", \"FastAPI\", \"Docker\", \"PostgreSQL\", \"pandas\", \"Machine Learning\", "
-    "\"Authentication\", \"WebSocket\", \"GraphQL\"\n"
+    "protocols, concrete engineering disciplines.\n"
+    "   GOOD: \"React\", \"FastAPI\", \"Docker\", \"PostgreSQL\", \"pandas\", \"PyTorch\", "
+    "\"Hugging Face Transformers\", \"LangChain\", \"RAG\", \"LoRA\", \"ONNX\", \"vLLM\", "
+    "\"Vector Database\", \"Prompt Engineering\", \"Function Calling\", \"GraphQL\", "
+    "\"WebSocket\", \"Kubernetes\", \"Terraform\", \"Redis\", \"Celery\", \"OAuth\"\n"
     "   BAD: \"Error Handling\", \"Data Processing\", \"Web Development\", \"API Design\", "
-    "\"Object-Oriented Programming\", \"Asynchronous Programming\", \"Code Quality\"\n"
-    "2. Map imports and usage patterns to the framework/library name.\n"
-    "   e.g., \"import pandas\" or \"pd.DataFrame\" -> \"pandas\"\n"
-    "   e.g., \"useEffect\", \"useState\" -> \"React\"\n"
-    "3. Do NOT return the programming language itself as a skill.\n"
-    "4. Use standard capitalization (e.g., \"FastAPI\" not \"fastapi\", \"NumPy\" not \"numpy\").\n"
-    "5. Return at most {limit} skills.\n"
-    "6. Return ONLY JSON: {{\"skills\": [\"Skill1\", \"Skill2\"]}}"
+    "\"Object-Oriented Programming\", \"Code Quality\", \"Asynchronous Programming\", "
+    "\"String Manipulation\", \"Logging\"\n\n"
+    "2. Map imports and usage patterns to the framework/library/technique name:\n"
+    "   - \"from transformers import ...\" -> \"Hugging Face Transformers\"\n"
+    "   - \"from peft import LoraConfig\" -> \"LoRA\", \"PEFT\"\n"
+    "   - \"from langchain import ...\" -> \"LangChain\"\n"
+    "   - \"import chromadb\" -> \"ChromaDB\"\n"
+    "   - \"from openai import OpenAI\" -> \"OpenAI API\"\n"
+    "   - \"import torch\", \"nn.Module\" -> \"PyTorch\"\n"
+    "   - \"from diffusers import ...\" -> \"Diffusers\"\n"
+    "   - \"import pandas\", \"pd.DataFrame\" -> \"pandas\"\n"
+    "   - \"useEffect\", \"useState\" -> \"React\"\n"
+    "   - \"app = FastAPI()\" -> \"FastAPI\"\n\n"
+    "3. Recognize AI/ML patterns and name them specifically:\n"
+    "   - Fine-tuning with adapters (QLoRA, LoRA, PEFT) -> \"Fine-Tuning\", \"LoRA\", \"PEFT\"\n"
+    "   - Retrieval-augmented generation -> \"RAG\"\n"
+    "   - Embedding generation + vector search -> \"Vector Database\", \"Embeddings\"\n"
+    "   - Tool/function calling with LLMs -> \"Function Calling\"\n"
+    "   - Prompt templates, chat completions -> \"Prompt Engineering\"\n"
+    "   - Model quantization (GPTQ, AWQ, bitsandbytes) -> \"Model Quantization\"\n"
+    "   - Model serving (vLLM, TGI, Triton) -> name the specific server\n"
+    "   - Agents, planning, multi-step reasoning -> \"AI Agents\"\n\n"
+    "4. Do NOT return the programming language itself as a skill.\n"
+    "5. Use standard capitalization (e.g., \"FastAPI\" not \"fastapi\", \"NumPy\" not \"numpy\", "
+    "\"PyTorch\" not \"pytorch\", \"LangChain\" not \"langchain\").\n"
+    "6. Return at most {limit} skills.\n"
+    "7. Return ONLY JSON: {{\"skills\": [\"Skill1\", \"Skill2\"]}}"
 )
+
+FEW_SHOT_EXAMPLES = [
+    {
+        "user": (
+            "Language: Python\nFile: train_lora.py\n"
+            "Imports: transformers, peft, torch, datasets, bitsandbytes, trl\n\n"
+            "Code:\n```\n"
+            "model = AutoModelForCausalLM.from_pretrained(\n"
+            "    base_model, quantization_config=BitsAndBytesConfig(load_in_4bit=True),\n"
+            "    device_map=\"auto\"\n"
+            ")\n"
+            "lora_config = LoraConfig(r=16, lora_alpha=32, target_modules=[\"q_proj\", \"v_proj\"])\n"
+            "model = get_peft_model(model, lora_config)\n"
+            "trainer = SFTTrainer(\n"
+            "    model=model, train_dataset=dataset,\n"
+            "    tokenizer=tokenizer, args=training_args\n"
+            ")\n"
+            "trainer.train()\n"
+            "model.push_to_hub(\"my-org/fine-tuned-model\")\n"
+            "```"
+        ),
+        "assistant": '{"skills": ["Hugging Face Transformers", "LoRA", "PEFT", "QLoRA", "PyTorch", "Fine-Tuning", "Hugging Face Hub"]}'
+    },
+    {
+        "user": (
+            "Language: Python\nFile: rag_pipeline.py\n"
+            "Imports: langchain, chromadb, openai, tiktoken\n\n"
+            "Code:\n```\n"
+            "embeddings = OpenAIEmbeddings(model=\"text-embedding-3-small\")\n"
+            "vectorstore = Chroma.from_documents(chunks, embeddings, persist_directory=\"./db\")\n"
+            "retriever = vectorstore.as_retriever(search_kwargs={\"k\": 5})\n"
+            "llm = ChatOpenAI(model=\"gpt-4\", temperature=0)\n"
+            "chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever)\n"
+            "response = chain.invoke({\"query\": user_question})\n"
+            "```"
+        ),
+        "assistant": '{"skills": ["LangChain", "ChromaDB", "OpenAI API", "RAG", "Embeddings", "Vector Database"]}'
+    },
+    {
+        "user": (
+            "Language: TypeScript\nFile: api/routes/users.ts\n"
+            "Imports: express, prisma, zod, jsonwebtoken, bcrypt\n\n"
+            "Code:\n```\n"
+            "const schema = z.object({ email: z.string().email(), password: z.string().min(8) });\n"
+            "router.post('/register', async (req, res) => {\n"
+            "  const { email, password } = schema.parse(req.body);\n"
+            "  const hashed = await bcrypt.hash(password, 12);\n"
+            "  const user = await prisma.user.create({ data: { email, password: hashed } });\n"
+            "  const token = jwt.sign({ sub: user.id }, process.env.JWT_SECRET);\n"
+            "  res.json({ token });\n"
+            "});\n"
+            "```"
+        ),
+        "assistant": '{"skills": ["Express", "Prisma", "Zod", "JWT", "Authentication", "bcrypt"]}'
+    },
+]
 
 
 def check_ollama_ready(config):
@@ -71,12 +148,15 @@ def extract_skills_from_snippet(model_data, code_snippet, file_name="", lang="",
     else:
         user_content = f"Code:\n```\n{code_snippet}\n```"
 
+    messages = [{"role": "system", "content": model_data["system_prompt"]}]
+    for ex in FEW_SHOT_EXAMPLES:
+        messages.append({"role": "user", "content": ex["user"]})
+        messages.append({"role": "assistant", "content": ex["assistant"]})
+    messages.append({"role": "user", "content": user_content})
+
     payload = {
         "model": model_data["model"],
-        "messages": [
-            {"role": "system", "content": model_data["system_prompt"]},
-            {"role": "user", "content": user_content}
-        ],
+        "messages": messages,
         "stream": False,
         "format": "json",
         "think": False,

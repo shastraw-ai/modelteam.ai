@@ -1,24 +1,13 @@
-"""Filter extracted skills down to job-search-relevant ones.
+"""Filter extracted skills: deduplicate, canonicalize, drop generics.
 
 Three passes:
 
-  1. Deterministic strip of programming-language names — these belong in the
-     ``langs`` dimension of the profile, not in the skills list.
+  1. Deterministic strip of programming-language names.
+  2. Hierarchical canonicalization — iteratively merge variant skills
+     into canonical forms until no new merges happen.
+  3. Generic filter — LLM drops skills too vague for a resume.
 
-  2. LLM judgment via the same Ollama model used for extraction. For each
-     remaining skill, the model returns ``{canonical, keep}``:
-
-       - canonical merges sub-skill variants under an umbrella
-         (``JSON Parsing``/``JSON Handling``/``JSON Schema`` → ``JSON``;
-         ``useState``/``useEffect`` → ``React Hooks``).
-       - keep applies a strict job-search rubric (concrete framework or
-         discipline → keep; generic programming concept / vague umbrella → drop).
-
-  3. Group surviving originals by canonical, summing scores so the dialog
-     and the rendered HTML show one consolidated row per real skill.
-
-Decisions are cached on disk (``skill_filter_v2_cache.json`` in the profile
-directory) so re-runs of ``edit_skills.py`` don't re-call the LLM.
+Generic filter decisions are cached per-skill on disk so re-runs are fast.
 """
 
 import hashlib
@@ -30,130 +19,57 @@ import requests
 
 from .utils import get_extension_to_language_map
 
-BATCH_SIZE = 10
 CACHE_FILENAME = "skill_filter_cache.json"
+CANON_BATCH_SIZE = 40
 
-FILTER_PROMPT = """You curate the SKILLS section of a software engineer's resume.
+CANONICALIZE_PROMPT = """You merge duplicate and closely-related technical skills into canonical forms.
 
-For each input, return {"input": str, "canonical": str, "keep": bool}.
+Given a list of skills extracted from code, identify groups that refer to the same underlying technology and pick one canonical name for each group.
 
-============================================================
-STEP 1 — pick CANONICAL (consolidate variants):
-============================================================
-- "useState", "useEffect", "useRef", "useContext", "Hooks", "Refs", "JSX",
-  "Component Lifecycle", "Component Props", "Component Composition",
-  "Component Structure", "Component Development", "Conditional Rendering",
-  "Event Handling", "DOM Manipulation", "react" -> "React"
-- "API Communication", "API Calls", "API Fetching", "API Integration",
-  "API Interaction", "API Response Handling", "API Design", "REST API",
-  "Web APIs", "HTTP Requests", "HTTP Exception Handling", "Fetch API",
-  "Query Parameters", "Range Requests", "Requests Library" -> "REST APIs"
-- "File I/O", "File Handling", "File System Operations", "File System Interaction",
-  "File Writing", "File Downloading", "Pathlib", "Path Handling",
-  "Path Manipulation" -> "File System I/O"
-- "Async/Await", "Promises", "Promise Handling", "Asynchronous Functions",
-  "Asynchronous Operations", "Asynchronous Tasks" -> "Asynchronous Programming"
-- "JSON Parsing", "JSON Handling", "JSON Schema", "JSON Serialization",
-  "JSON Processing" -> "JSON"
-- "Date Manipulation", "Date Handling", "Date Formatting",
-  "Date/Time Manipulation", "Date and Time Manipulation", "Datetime",
-  "Datetime Handling", "Datetime Manipulation", "Timestamp Handling" ->
-  "Date/Time Handling"
-- "Data Manipulation", "Data Processing", "Data Transformation",
-  "Data Filtering", "Data Extraction", "Data Mapping", "Data Structuring",
-  "Data Display", "Data Fetching", "Data Persistence", "Data Serialization",
-  "Data Aggregation", "Data Imputation", "Text Processing",
-  "data analysis", "data retrieval" -> "Data Processing"
-- "OOP", "Object-Oriented Programming (OOP)", "Class Inheritance",
-  "Class Design", "Class Instantiation", "Inheritance" ->
-  "Object-Oriented Programming"
-- "Database Interaction", "Database Querying", "Database Modeling",
-  "SQL Querying", "sqlite3", "Foreign Keys", "Schema Definition",
-  "Schema Initialization", "Query Building", "data modeling",
-  "data retrieval" -> "SQL"
-- "ORM", "Object-Relational Mapping (ORM)", "object relational mapping",
-  "SQLAlchemy (or similar ORM)" -> "SQLAlchemy" if SQLAlchemy in input set,
-  else "Object-Relational Mapping"
-- "Centrality Measures", "Community Detection", "Graph Theory",
-  "Graph Algorithms", "Network Analysis" -> "NetworkX" if NetworkX in input set,
-  else "Graph Algorithms"
-- "DataFrame", "DataFrames", "DataFrame Operations", "Rolling Statistics",
-  "Parquet" -> "pandas"
-- "Vectorization", "Numerical Computation", "Mathematical Functions" -> "NumPy"
-- "Subprocess", "subprocess", "Process Management",
-  "Command Line Execution", "Background Tasks" -> "Subprocess Management"
-- "State Management", "State Management (implied)" -> if Redux/Zustand/etc named
-  in input set merge under that library; otherwise -> "State Management"
-- "Image Manipulation", "image processing" -> "Image Processing"
-- "Pytest", "pytest", "Assertion Testing", "testing", "unit testing" -> "pytest"
-- "Token Management", "Google Sign-In", "authentication" -> "Authentication"
-- "Mocking", "Mocking/Stubbing", "unittest.mock" -> "Mocking"
-- "pytorch", "Pytorch" -> "PyTorch"
-- "postgresql" -> "PostgreSQL"
-- "Caching" -> "Redis" if Redis in input set, else drop the merge
-- otherwise the canonical is the input unchanged
+MERGE these kinds of duplicates:
+- Sub-features into their parent: "useState", "useEffect", "React Hooks", "JSX" -> "React"
+- API wrappers into the library: "pd.DataFrame", "DataFrame Operations" -> "pandas"
+- Technique variants: "QLoRA", "LoRA adapters" -> "LoRA"
+- Synonyms: "Containerization" -> "Docker" (if Docker is in the list)
+- Partial overlaps: "JWT", "JSON Web Token" -> "JWT"
 
-============================================================
-STEP 2 — KEEP=true ONLY IF the CANONICAL is in the KEEP list.
-============================================================
-KEEP these canonical forms (and only these or similar specific named tools):
-   Frameworks: React, React Native, Django, FastAPI, Flask, Express, Spring,
-   Pydantic, SQLAlchemy, Boto3, NetworkX, OpenCV, pandas, NumPy, PyTorch,
-   pytest, Redux Toolkit, Zustand, Expo, Expo Router, requests, argparse.
-   Platforms: Kubernetes, Docker, Terraform, Redis, PostgreSQL, MongoDB, SQLite,
-   Kafka, Snowflake, AWS S3, Google Cloud Storage, Vercel, Chrome Extension API,
-   Google GenAI SDK, Chrome Extension, FFmpeg, CSS-in-JS, Service Worker.
-   Concrete disciplines: Authentication, OAuth, Web Scraping, Image Processing,
-   Video Processing, Time Series Analysis, Feature Engineering, Machine Learning,
-   Computer Vision, Distributed Systems, LLM Integration, Prompt Engineering,
-   Function Calling, Vector Search, Vector Database Interaction.
-   Concrete engineering practices: Unit Testing, Integration Testing,
-   Microservices, Database Design, Rate Limiting, Mocking, Subprocess Management,
-   Dependency Injection.
+DO NOT MERGE genuinely different technologies:
+- "React" and "Vue" — different frameworks
+- "Docker" and "Kubernetes" — related but distinct
+- "pandas" and "NumPy" — different libraries
+- "FastAPI" and "Flask" — different frameworks
+- "PostgreSQL" and "Redis" — different databases
+- "LoRA" and "RAG" — different AI techniques
 
-============================================================
-STEP 3 — these CANONICAL forms are ALWAYS keep=false. They are too generic:
-============================================================
-   REST APIs
-   File System I/O
-   Date/Time Handling
-   JSON
-   Object-Oriented Programming
-   Asynchronous Programming
-   Data Processing
-   Data Structures
-   State Management            (when no library named)
-   API Design
-   API Development
-   Web Development
-   Frontend Development
-   Backend Development
-   Algorithm Design
-   Algorithm
-   Error Handling
-   Exception Handling
-   Logging
-   Type Hinting / Type Safety / Type Definition / Immutability
-   Conditional Logic / Loops / Iteration / Mapping / Aggregation / Grouping
-   String Manipulation / String Formatting / Dictionary Manipulation
-   List Comprehension / Array Manipulation / Array Methods
-   Object Manipulation / Object Access / Object Destructuring
-   Method Design / Function Definition / Function Design / Class Design
-   Module System (ESM) / Style Modules / StyleSheet / Styling / ClassNames /
-   Flexbox / Local Storage / Service Layer / Command Pattern
-   URL Parsing / Form Handling / Session Management / Configuration Management
-   Environment Variables
-   Code Quality / Best Practices / Maintainability / Refactoring
-   Programming language names: Python, JavaScript, TypeScript, Java, Go, C,
-   C++, Ruby, Rust, PHP, HTML, CSS, JSON, YAML, XML.
+Use standard capitalization (e.g., "FastAPI", "NumPy", "PyTorch", "LangChain").
 
-============================================================
-RULE: when uncertain -> DROP. Aim for 20-40 sharp, specific skills.
-============================================================
+Return ONLY JSON: {"groups": [{"members": ["skill1", "skill2"], "canonical": "Name"}, ...]}
+Every input skill must appear in exactly one group. A skill with no merge partner is a single-member group."""
 
-Return ONLY JSON: {"results": [{"input": "<exact input>", "canonical": "<form>", "keep": true|false}, ...]}. Include every input skill exactly once."""
 
-PROMPT_HASH = hashlib.sha256(FILTER_PROMPT.encode("utf-8")).hexdigest()[:16]
+GENERIC_FILTER_PROMPT = """You filter a software engineer's skill list for their public profile.
+
+KEEP skills specific enough for a recruiter to search for:
+- Named frameworks/libraries: "React", "FastAPI", "pandas", "LangChain", "PyTorch"
+- Named platforms/infrastructure: "Docker", "Kubernetes", "Redis", "PostgreSQL", "AWS S3"
+- Specific techniques: "RAG", "LoRA", "Fine-Tuning", "Function Calling", "OAuth"
+- Concrete disciplines: "Machine Learning", "Computer Vision", "Web Scraping", "Authentication"
+
+DROP skills that are too generic or trivially expected:
+- Generic programming concepts: "Error Handling", "Data Processing", "OOP"
+- Vague umbrellas: "Web Development", "Backend Development", "API Design", "Code Quality"
+- Language features as skills: "List Comprehension", "Async/Await", "Type Hinting", "Decorators"
+- Trivially common: "Logging", "Configuration", "Environment Variables", "JSON"
+- Overly broad: "Data Structures", "Algorithms", "String Manipulation", "File I/O"
+
+When uncertain, DROP. A shorter, sharper profile is better.
+
+Return ONLY JSON: {"keep": ["Skill1", ...], "drop": ["Skill3", ...]}
+Every input skill must appear in exactly one list."""
+
+PROMPT_HASH = hashlib.sha256(
+    (CANONICALIZE_PROMPT + GENERIC_FILTER_PROMPT).encode("utf-8")
+).hexdigest()[:16]
 
 
 def _language_blocklist():
@@ -167,7 +83,6 @@ def _language_blocklist():
 
 
 def _load_cache(cache_path):
-    """Load the per-model decision cache. Auto-invalidates when the prompt changes."""
     if not cache_path or not os.path.exists(cache_path):
         return {}
     try:
@@ -175,106 +90,179 @@ def _load_cache(cache_path):
             data = json.load(f)
         if data.get("prompt_hash") != PROMPT_HASH:
             return {}
-        models = data.get("models")
-        return models if isinstance(models, dict) else {}
+        return data
     except (json.JSONDecodeError, OSError):
         return {}
 
 
-def _save_cache(cache_path, cache):
+def _save_cache(cache_path, data):
     if not cache_path:
         return
+    data["prompt_hash"] = PROMPT_HASH
     try:
         with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump({"prompt_hash": PROMPT_HASH, "models": cache},
-                      f, indent=2, sort_keys=True)
+            json.dump(data, f, indent=2, sort_keys=True)
     except OSError:
         pass
 
 
-def _ollama_filter_call(skills, model_data):
-    """Ask the LLM about a batch. Returns {skill: {"canonical": str, "keep": bool}} or {} on failure."""
+def _llm_call(model_data, system_prompt, user_content, num_predict=2048):
     url = f"{model_data['endpoint']}/api/chat"
     payload = {
         "model": model_data["model"],
         "messages": [
-            {"role": "system", "content": FILTER_PROMPT},
-            {"role": "user", "content": "Evaluate these skills:\n" + json.dumps(skills)},
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
         ],
         "stream": False,
         "format": "json",
         "think": False,
-        "options": {"temperature": 0.0, "num_predict": 4096},
+        "options": {"temperature": 0.0, "num_predict": num_predict},
     }
     try:
         resp = requests.post(url, json=payload, timeout=180)
         resp.raise_for_status()
         content = resp.json()["message"]["content"]
         parsed = json.loads(content)
-        results = parsed.get("results") if isinstance(parsed, dict) else None
-        if not isinstance(results, list):
-            return {}
-        out = {}
-        for r in results:
-            if not isinstance(r, dict):
-                continue
-            inp = r.get("input")
-            canonical = r.get("canonical") or inp
-            if not isinstance(inp, str) or not isinstance(canonical, str):
-                continue
-            out[inp] = {"canonical": canonical.strip() or inp, "keep": bool(r.get("keep"))}
-        return out
+        return parsed if isinstance(parsed, dict) else {}
     except Exception as e:
-        print(f"  LLM filter call failed: {e}", flush=True)
+        print(f"    LLM call failed: {e}", flush=True)
         return {}
 
 
+def _canonicalize_batch(skills, model_data):
+    """Merge variant skills in one batch. Returns {input_skill: canonical}."""
+    result = _llm_call(
+        model_data, CANONICALIZE_PROMPT,
+        f"Merge these skills:\n{json.dumps(skills)}",
+        num_predict=4096,
+    )
+    skill_set = set(skills)
+    mapping = {}
+    for group in result.get("groups", []):
+        if not isinstance(group, dict):
+            continue
+        canonical = group.get("canonical", "")
+        members = group.get("members", [])
+        if not canonical or not isinstance(members, list):
+            continue
+        for m in members:
+            if isinstance(m, str) and m in skill_set:
+                mapping[m] = canonical.strip()
+    for s in skills:
+        if s not in mapping:
+            mapping[s] = s
+    return mapping
+
+
+def _filter_generics_batch(skills, model_data):
+    """Decide which skills are too generic. Returns set of skills to keep."""
+    result = _llm_call(
+        model_data, GENERIC_FILTER_PROMPT,
+        f"Filter these skills:\n{json.dumps(skills)}",
+    )
+    keep = result.get("keep", [])
+    if isinstance(keep, list) and keep:
+        return {s for s in keep if isinstance(s, str)}
+    return set(skills)
+
+
+def _hierarchical_canonicalize(candidates, model_data):
+    """Iteratively canonicalize until stable.
+
+    Returns (chain, merged_scores):
+      - chain: {original_skill: final_canonical}
+      - merged_scores: {canonical: summed_score}
+    """
+    chain = {s: s for s in candidates}
+    current = dict(candidates)
+    max_rounds = 5
+
+    for round_num in range(max_rounds):
+        skill_list = sorted(current.keys())
+        batches = [skill_list[i:i + CANON_BATCH_SIZE]
+                   for i in range(0, len(skill_list), CANON_BATCH_SIZE)]
+
+        merge_map = {}
+        for idx, batch in enumerate(batches):
+            t0 = time.time()
+            batch_map = _canonicalize_batch(batch, model_data)
+            merge_map.update(batch_map)
+            print(f"    canonicalize {idx + 1}/{len(batches)}  "
+                  f"({len(batch)} skills, {time.time() - t0:.1f}s)", flush=True)
+
+        new_current = {}
+        for s, score in current.items():
+            canon = merge_map.get(s, s)
+            new_current[canon] = new_current.get(canon, 0) + score
+
+        for orig in chain:
+            old_canon = chain[orig]
+            chain[orig] = merge_map.get(old_canon, old_canon)
+
+        if len(new_current) == len(current):
+            break
+
+        print(f"  Round {round_num + 1}: {len(current)} → {len(new_current)} skills", flush=True)
+        current = new_current
+
+    return chain, current
+
+
 def filter_profile_skills(merged_skills, model_data, cache_path=None):
-    """Filter + canonicalize a merged skill dict for job-search relevance.
+    """Filter + canonicalize skill dict for job-search relevance.
 
-    Returns ``(language_drops, llm_drops, canonical_map, surviving_scores)``:
-
-      - ``language_drops``     set[str] of skills stripped as programming languages
-      - ``llm_drops``          set[str] of original skills the LLM dropped
-      - ``canonical_map``      dict[original → canonical] for every skill kept
-        (originals → canonical for the merge step downstream)
-      - ``surviving_scores``   dict[canonical → summed score] ready to display
+    Returns ``(language_drops, llm_drops, canonical_map, surviving_scores)``.
     """
     lang_block = _language_blocklist()
     language_drops = {s for s in merged_skills if s.lower() in lang_block}
+    candidates = {s: v for s, v in merged_skills.items() if s not in language_drops}
 
-    cache_model_key = model_data.get("model", "unknown")
-    cache = _load_cache(cache_path)
-    model_cache = cache.setdefault(cache_model_key, {})
+    if not candidates:
+        return language_drops, set(), {}, {}
 
-    candidates = [s for s in merged_skills if s not in language_drops]
-    needs_query = [s for s in candidates if s not in model_cache]
+    cache_data = _load_cache(cache_path)
+    model_key = model_data.get("model", "unknown")
+    generic_cache = cache_data.setdefault("generic_filter", {}).setdefault(model_key, {})
+
+    # Hierarchical canonicalize
+    print(f"  Canonicalizing {len(candidates)} skills...", flush=True)
+    chain, merged_scores = _hierarchical_canonicalize(candidates, model_data)
+
+    # Filter generics (cached per-skill)
+    canonical_skills = sorted(merged_scores.keys())
+    needs_query = [s for s in canonical_skills if s not in generic_cache]
 
     if needs_query:
-        print(f"  Querying {model_data.get('model')} for canonical + relevance of "
-              f"{len(needs_query)} skills (batch size {BATCH_SIZE})...", flush=True)
-        total_batches = (len(needs_query) + BATCH_SIZE - 1) // BATCH_SIZE
-        for i in range(0, len(needs_query), BATCH_SIZE):
-            batch = needs_query[i:i + BATCH_SIZE]
+        print(f"  Filtering {len(needs_query)} skills for generic concepts...", flush=True)
+        batches = [needs_query[i:i + CANON_BATCH_SIZE]
+                   for i in range(0, len(needs_query), CANON_BATCH_SIZE)]
+        for idx, batch in enumerate(batches):
             t0 = time.time()
-            decisions = _ollama_filter_call(batch, model_data)
-            for skill in batch:
-                # Default: keep as-is on missing — permissive when the LLM stays silent.
-                model_cache[skill] = decisions.get(skill, {"canonical": skill, "keep": True})
-            print(f"    batch {i // BATCH_SIZE + 1}/{total_batches}  "
+            keep_set = _filter_generics_batch(batch, model_data)
+            for s in batch:
+                generic_cache[s] = s in keep_set
+            print(f"    filter {idx + 1}/{len(batches)}  "
                   f"({len(batch)} skills, {time.time() - t0:.1f}s)", flush=True)
-        _save_cache(cache_path, cache)
+        _save_cache(cache_path, cache_data)
+
+    keep_canonicals = {s for s in canonical_skills if generic_cache.get(s, True)}
 
     llm_drops = set()
     canonical_map = {}
     surviving_scores = {}
-    for s in candidates:
-        decision = model_cache.get(s) or {"canonical": s, "keep": True}
-        if not decision.get("keep", True):
-            llm_drops.add(s)
+
+    for orig, canon in chain.items():
+        if orig not in candidates:
             continue
-        canonical = decision.get("canonical") or s
-        canonical_map[s] = canonical
-        surviving_scores[canonical] = surviving_scores.get(canonical, 0) + merged_skills[s]
+        if canon not in keep_canonicals:
+            llm_drops.add(orig)
+            continue
+        canonical_map[orig] = canon
+        surviving_scores[canon] = surviving_scores.get(canon, 0) + candidates[orig]
+
+    kept = len(surviving_scores)
+    dropped = len(merged_scores) - kept
+    print(f"  Kept {kept} skills, dropped {dropped} generic concepts.", flush=True)
 
     return language_drops, llm_drops, canonical_map, surviving_scores
