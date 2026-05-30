@@ -464,7 +464,7 @@ if __name__ == "__main__":
         apply_choices(merged_profile, choices_file, edited_file, bad_skills, canonical_map)
         pdf_file = generate_pdf_report(edited_file, pdf_stats_json, pdf_path)
         html_file = generate_html_report(edited_file, args.profile_path)
-        md_file = generate_md_report(edited_file, args.profile_path)
+        md_file = generate_md_report(edited_file, args.profile_path, model_data=model_data)
         print_message(pdf_file, html_file, md_file)
     else:
         print("Changes were NOT SAVED. Exiting... Please run the script again.")

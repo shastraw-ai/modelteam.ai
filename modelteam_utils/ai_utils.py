@@ -237,6 +237,51 @@ def normalize_skill_names(raw_skills):
     return normalized
 
 
+GROUP_SKILLS_PROMPT = (
+    "Group these technical skills into 3-5 categories for a developer profile chart.\n\n"
+    "Use short domain-based category names like:\n"
+    "  \"AI / ML\", \"Frontend\", \"Backend\", \"Data\", \"DevOps\", \"Databases\", \"Cloud\"\n\n"
+    "RULES:\n"
+    "1. Each group should have 1-5 skills. Merge tiny groups into the nearest fit.\n"
+    "2. Every input skill must appear in exactly one group.\n"
+    "3. Order groups by total importance (most important group first).\n"
+    "4. Return ONLY JSON: {\"groups\": [{\"name\": \"Category\", \"skills\": [\"Skill1\"]}, ...]}"
+)
+
+
+def group_skills_for_report(model_data, skills):
+    """Group skills into categories for charting. Returns list of {name, skills} dicts."""
+    if not skills:
+        return []
+    url = f"{model_data['endpoint']}/api/chat"
+    payload = {
+        "model": model_data["model"],
+        "messages": [
+            {"role": "system", "content": GROUP_SKILLS_PROMPT},
+            {"role": "user", "content": f"Group these skills:\n{json.dumps(skills)}"},
+        ],
+        "stream": False,
+        "format": "json",
+        "think": False,
+        "options": {"temperature": 0.0, "num_predict": 1024},
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=60)
+        resp.raise_for_status()
+        parsed = json.loads(resp.json()["message"]["content"])
+        groups = parsed.get("groups", [])
+        if isinstance(groups, list) and groups:
+            valid = []
+            for g in groups:
+                if isinstance(g, dict) and g.get("name") and g.get("skills"):
+                    valid.append({"name": g["name"], "skills": list(g["skills"])})
+            if valid:
+                return valid
+    except Exception as e:
+        print(f"  Skill grouping error: {e}", flush=True)
+    return [{"name": "Skills", "skills": skills}]
+
+
 PROFILE_RANK_PROMPT = (
     "You curate a software engineer's public profile. Given their programming languages "
     "and extracted skill list, decide which skills should appear on the profile.\n\n"

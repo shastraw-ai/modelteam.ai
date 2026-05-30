@@ -28,6 +28,7 @@ try:
 except ImportError:
     WordCloud = None
 
+from .ai_utils import group_skills_for_report
 from .html_report import _build_report_data
 
 MD_FILE_NAME = "README.md"
@@ -40,8 +41,6 @@ _LANG_COLORS = [
     "#8b5cf6", "#ec4899", "#64748b",
 ]
 _HEATMAP_STOPS = ["#eef2ff", "#a5b4fc", "#6366f1", "#4338ca", "#312e81"]
-_BAR_GRADIENT = ("#a5b4fc", "#4f46e5")  # light indigo → deep indigo
-
 _BG = "#ffffff"
 _TEXT = "#1e293b"
 _MUTED = "#64748b"
@@ -64,183 +63,138 @@ def _save(fig, path):
     plt.close(fig)
 
 
-# ── Chart: Top Skills (horizontal bar) ──────────────────────────────────────
 
-def _chart_skills(skill_scores, path, limit=12):
-    if not skill_scores:
+# ── Chart: Languages (line chart over time) ────────────────────────────────
+
+def _chart_languages(lang_qtr_added, quarters, path):
+    if not lang_qtr_added:
         return False
 
-    items = sorted(skill_scores.items(), key=lambda x: x[1], reverse=True)[:limit]
-    items.reverse()
-    names = [i[0] for i in items]
-    scores = [i[1] for i in items]
-    n = len(names)
-    max_val = max(scores) if scores else 1
+    display_quarters = quarters[-8:]
+    if not display_quarters:
+        return False
 
-    cmap = mcolors.LinearSegmentedColormap.from_list("bar", [_BAR_GRADIENT[0], _BAR_GRADIENT[1]])
-    colors = [cmap(0.25 + 0.75 * i / max(n - 1, 1)) for i in range(n)]
+    lang_totals = {lang: sum(qtrs.get(q, 0) for q in display_quarters)
+                   for lang, qtrs in lang_qtr_added.items()}
+    items = sorted(lang_totals.items(), key=lambda x: x[1], reverse=True)[:7]
+    items = [i for i in items if i[1] > 0]
+    if not items:
+        return False
 
-    fig, ax = plt.subplots(figsize=(8, max(2.5, n * 0.42 + 0.8)))
-    bars = ax.barh(range(n), scores, height=0.62, color=colors, edgecolor="none", zorder=3)
+    qtr_labels = [f"{q[4:]}'{q[2:4]}" for q in display_quarters]
+    x = np.arange(len(display_quarters))
+    colors = _LANG_COLORS[:len(items)]
 
-    ax.set_yticks(range(n))
-    ax.set_yticklabels(names, fontsize=11, color=_TEXT)
-    ax.set_xlim(0, max_val * 1.18)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    for i, (lang, _) in enumerate(items):
+        values = [lang_qtr_added[lang].get(q, 0) for q in display_quarters]
+        ax.plot(x, values, '-o', label=lang, color=colors[i],
+                linewidth=2, markersize=4)
+
+    ax.set_xlim(0, len(display_quarters) - 1)
+    ax.set_xticks(x)
+    ax.set_xticklabels(qtr_labels, fontsize=10, color=_MUTED)
     ax.tick_params(left=False, bottom=False)
-    ax.xaxis.set_visible(False)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(
+        lambda v, _: f"{v / 1000:.0f}K" if v >= 1000 else f"{v:.0f}"
+    ))
+    ax.tick_params(axis="y", labelsize=9, labelcolor=_MUTED)
 
     for spine in ax.spines.values():
         spine.set_visible(False)
 
-    for i, v in enumerate(scores):
-        ax.text(v + max_val * 0.02, i, f"{v:,.0f}", va="center", fontsize=9, color=_MUTED)
-
-    ax.set_title("Top Skills", fontsize=15, fontweight="bold", color=_TEXT, pad=14, loc="left")
-    ax.text(1.0, 1.06, "lines of code", transform=ax.transAxes,
+    ax.set_title("Languages", fontsize=15, fontweight="bold",
+                 color=_TEXT, pad=14, loc="left")
+    ax.text(1.0, 1.06, "lines of code per quarter", transform=ax.transAxes,
             ha="right", fontsize=9, color=_MUTED, style="italic")
 
+    ax.legend(frameon=False, fontsize=10, labelcolor=_TEXT, loc="upper left",
+              bbox_to_anchor=(1.02, 1.0))
+
     _save(fig, path)
     return True
 
 
-# ── Chart: Languages (donut) ────────────────────────────────────────────────
+# ── Chart: Activity (grouped small multiples) ─────────────────────────────
 
-def _chart_languages(lang_totals, path):
-    if not lang_totals:
+_AREA_COLORS = [
+    "#6366f1", "#06b6d4", "#f59e0b", "#10b981", "#8b5cf6",
+    "#ec4899", "#ef4444", "#0ea5e9", "#64748b", "#84cc16",
+]
+
+def _chart_activity(skill_qtr_lines, sorted_skills, quarters, path, groups=None):
+    display_quarters = quarters[-8:]
+    if not display_quarters:
         return False
 
-    items = sorted(lang_totals.items(), key=lambda x: x[1], reverse=True)[:7]
-    labels = [i[0] for i in items]
-    values = [i[1] for i in items]
-    total = sum(values)
-    colors = _LANG_COLORS[: len(labels)]
-
-    fig, ax = plt.subplots(figsize=(5.5, 5.5))
-    wedges, texts, autotexts = ax.pie(
-        values,
-        labels=None,
-        autopct=lambda p: f"{p:.0f}%" if p >= 5 else "",
-        colors=colors,
-        pctdistance=0.78,
-        startangle=90,
-        wedgeprops=dict(width=0.34, edgecolor=_BG, linewidth=3),
-    )
-    for t in autotexts:
-        t.set_fontsize(10)
-        t.set_fontweight("bold")
-        t.set_color("white")
-
-    # center text: total lines
-    if total >= 10_000:
-        center_num = f"{total / 1000:.1f}K"
-    elif total >= 1_000_000:
-        center_num = f"{total / 1_000_000:.1f}M"
-    else:
-        center_num = f"{total:,}"
-    ax.text(0, 0.06, center_num, ha="center", va="center",
-            fontsize=22, fontweight="bold", color=_TEXT)
-    ax.text(0, -0.14, "lines", ha="center", va="center",
-            fontsize=11, color=_MUTED)
-
-    # legend on the right
-    ax.legend(
-        wedges, labels,
-        loc="center left", bbox_to_anchor=(1.02, 0.5),
-        frameon=False, fontsize=11, labelcolor=_TEXT,
-    )
-
-    _save(fig, path)
-    return True
-
-
-# ── Chart: Activity (rounded-cell heatmap) ──────────────────────────────────
-
-def _chart_activity(skill_qtr_lines, sorted_skills, quarters, path):
-    display_quarters = quarters[-8:]
-
-    timeline_skills = []
+    active_skills = set()
     for skill, _ in sorted_skills:
         if skill in skill_qtr_lines:
-            if any(skill_qtr_lines[skill].get(q, 0) > 0 for q in display_quarters):
-                timeline_skills.append(skill)
-        if len(timeline_skills) >= 12:
-            break
+            total = sum(skill_qtr_lines[skill].get(q, 0) for q in display_quarters)
+            if total > 0:
+                active_skills.add(skill)
 
-    if not timeline_skills or not display_quarters:
+    if not active_skills:
         return False
 
-    n_sk = len(timeline_skills)
+    if not groups:
+        ordered = [s for s, _ in sorted_skills if s in active_skills][:8]
+        groups = [{"name": "Skills", "skills": ordered}]
+
+    groups = [
+        {"name": g["name"], "skills": [s for s in g["skills"] if s in active_skills]}
+        for g in groups
+    ]
+    groups = [g for g in groups if g["skills"]]
+    if not groups:
+        return False
+
+    n_groups = len(groups)
     n_qt = len(display_quarters)
+    qtr_labels = [f"{q[4:]}'{q[2:4]}" for q in display_quarters]
+    x = np.arange(n_qt)
 
-    raw = np.zeros((n_sk, n_qt))
-    for i, skill in enumerate(timeline_skills):
-        for j, q in enumerate(display_quarters):
-            raw[i, j] = skill_qtr_lines.get(skill, {}).get(q, 0)
+    ncols = 2 if n_groups >= 4 else 1
+    nrows = (n_groups + ncols - 1) // ncols
+    fig_w = 5.5 * ncols
+    fig_h = 3.0 * nrows + 0.8
 
-    normed = np.zeros_like(raw)
-    for i in range(n_sk):
-        mx = raw[i].max()
-        if mx > 0:
-            normed[i] = raw[i] / mx
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h),
+                             squeeze=False)
 
-    cmap = mcolors.LinearSegmentedColormap.from_list("hm", _HEATMAP_STOPS)
+    color_idx = 0
+    for g_idx, group in enumerate(groups):
+        row, col = g_idx // ncols, g_idx % ncols
+        ax = axes[row][col]
 
-    cell_w, cell_h = 0.82, 0.82
-    rounding = 0.12
-    fig, ax = plt.subplots(figsize=(max(5.5, n_qt * 0.9 + 3), max(3, n_sk * 0.54 + 1.2)))
+        for skill in group["skills"]:
+            values = [skill_qtr_lines.get(skill, {}).get(q, 0) for q in display_quarters]
+            color = _AREA_COLORS[color_idx % len(_AREA_COLORS)]
+            ax.plot(x, values, '-o', label=skill, color=color,
+                    linewidth=2, markersize=4)
+            color_idx += 1
 
-    for i in range(n_sk):
-        for j in range(n_qt):
-            v = normed[i, j]
-            fc = cmap(v) if raw[i, j] > 0 else _EMPTY_CELL
-            rect = FancyBboxPatch(
-                (j - cell_w / 2, i - cell_h / 2), cell_w, cell_h,
-                boxstyle=f"round,pad=0,rounding_size={rounding}",
-                facecolor=fc, edgecolor="none", zorder=2,
-            )
-            ax.add_patch(rect)
+        ax.set_title(group["name"], fontsize=12, fontweight="bold",
+                     color=_TEXT, loc="left", pad=8)
+        ax.set_xlim(0, n_qt - 1)
+        ax.set_xticks(x)
+        ax.set_xticklabels(qtr_labels, fontsize=8, color=_MUTED)
+        ax.tick_params(left=False, bottom=False, labelsize=8, labelcolor=_MUTED)
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(
+            lambda v, _: f"{v / 1000:.0f}K" if v >= 1000 else f"{v:.0f}"
+        ))
 
-    ax.set_xlim(-0.5, n_qt - 0.5)
-    ax.set_ylim(n_sk - 0.5, -0.5)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
 
-    qtr_labels = []
-    for q in display_quarters:
-        yr = q[2:4]
-        qp = q[4:]
-        qtr_labels.append(f"{qp}\n'{yr}")
-    ax.set_xticks(range(n_qt))
-    ax.set_xticklabels(qtr_labels, fontsize=9, color=_MUTED, ha="center")
-    ax.set_yticks(range(n_sk))
-    ax.set_yticklabels(timeline_skills, fontsize=10, color=_TEXT)
+        ax.legend(fontsize=8, frameon=False, loc="upper left", labelcolor=_TEXT)
 
-    ax.tick_params(length=0)
-    for spine in ax.spines.values():
-        spine.set_visible(False)
+    for g_idx in range(n_groups, nrows * ncols):
+        axes[g_idx // ncols][g_idx % ncols].set_visible(False)
 
-    ax.set_title("Activity Timeline", fontsize=15, fontweight="bold",
-                 color=_TEXT, pad=16, loc="left")
-
-    # legend: 5 small rounded squares
-    legend_y = -1.0
-    legend_labels = ["", "Low", "", "Med", "", "High"]
-    n_legend = 5
-    x_start = n_qt - n_legend - 0.2
-    for k in range(n_legend):
-        c = cmap(k / (n_legend - 1))
-        r = FancyBboxPatch(
-            (x_start + k * 0.7, n_sk + 0.15), 0.5, 0.4,
-            boxstyle=f"round,pad=0,rounding_size=0.08",
-            facecolor=c, edgecolor="none", zorder=2,
-            clip_on=False,
-        )
-        ax.add_patch(r)
-
-    ax.text(x_start - 0.1, n_sk + 0.35, "Less", fontsize=8, color=_MUTED,
-            ha="right", va="center", clip_on=False)
-    ax.text(x_start + n_legend * 0.7 + 0.1, n_sk + 0.35, "More", fontsize=8, color=_MUTED,
-            ha="left", va="center", clip_on=False)
-
-    fig.subplots_adjust(bottom=0.12)
+    fig.suptitle("Skill Activity", fontsize=15, fontweight="bold",
+                 color=_TEXT, x=0.03, ha="left", y=0.99)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
     _save(fig, path)
     return True
 
@@ -344,20 +298,9 @@ def _render_markdown(report_data, has):
         md.append("\n")
         md.append("---\n")
 
-    # ── Side-by-side: Languages donut + Skills bar ──
-    has_left = has.get("langs")
-    has_right = has.get("skills")
-    if has_left and has_right:
-        md.append("<table><tr>")
-        md.append(f'<td align="center" width="42%"><img src="{img}/languages.png" alt="Languages" width="100%"/></td>')
-        md.append(f'<td align="center" width="58%"><img src="{img}/skills.png" alt="Top Skills" width="100%"/></td>')
-        md.append("</tr></table>\n")
-        md.append("---\n")
-    elif has_left:
-        md.append(f'<p align="center"><img src="{img}/languages.png" alt="Languages" width="420"/></p>\n')
-        md.append("---\n")
-    elif has_right:
-        md.append(f'<p align="center"><img src="{img}/skills.png" alt="Top Skills" width="600"/></p>\n')
+    # ── Languages line chart ──
+    if has.get("langs"):
+        md.append(f'<p align="center"><img src="{img}/languages.png" alt="Languages" /></p>\n')
         md.append("---\n")
 
     # ── Activity heatmap (full width) ──
@@ -378,7 +321,7 @@ def _render_markdown(report_data, has):
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-def generate_md_report(profile_json, output_dir):
+def generate_md_report(profile_json, output_dir, model_data=None):
     """Generate a GitHub-profile-ready folder with README.md and charts.
 
     Returns the absolute path to the written README.md.
@@ -398,13 +341,17 @@ def generate_md_report(profile_json, output_dir):
     quarters = report_data.get("quarters", [])
 
     sorted_skills = sorted(merged_skills.items(), key=lambda x: x[1], reverse=True)
-    lang_totals = {lang: sum(qtrs.values()) for lang, qtrs in lang_qtr_added.items()}
+
+    groups = None
+    if model_data and merged_skills:
+        skill_names = [s for s, _ in sorted_skills]
+        print("  Grouping skills for activity chart...", flush=True)
+        groups = group_skills_for_report(model_data, skill_names)
 
     has = {
-        "skills":   _chart_skills(merged_skills, os.path.join(images_dir, "skills.png")),
-        "langs":    _chart_languages(lang_totals, os.path.join(images_dir, "languages.png")),
+        "langs":    _chart_languages(lang_qtr_added, quarters, os.path.join(images_dir, "languages.png")),
         "activity": _chart_activity(skill_qtr_lines, sorted_skills, quarters,
-                                    os.path.join(images_dir, "activity.png")),
+                                    os.path.join(images_dir, "activity.png"), groups=groups),
         "cloud":    _chart_wordcloud(merged_skills, os.path.join(images_dir, "wordcloud.png")),
     }
 
