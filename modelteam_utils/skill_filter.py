@@ -1,19 +1,24 @@
 """Filter extracted skills: deduplicate, canonicalize, drop generics.
 
-Three passes:
+Four passes:
 
   1. Deterministic strip of programming-language names.
   2. Hierarchical canonicalization — iteratively merge variant skills
      into canonical forms until no new merges happen.
-  3. Generic filter — LLM drops skills too vague for a resume.
+  3. Chunk-frequency analysis — compute how often each skill appears
+     across code snippets (TF-IDF analog) to inform the generic filter.
+  4. Generic filter — LLM drops skills too vague for a resume, using
+     chunk-frequency context when available.
 
 Generic filter decisions are cached per-skill on disk so re-runs are fast.
 """
 
 import hashlib
 import json
+import math
 import os
 import time
+from collections import defaultdict
 
 import requests
 
@@ -21,25 +26,30 @@ from .utils import get_extension_to_language_map
 
 CACHE_FILENAME = "skill_filter_cache.json"
 CANON_BATCH_SIZE = 40
+MIN_SCORE_PCT = 0.005  # drop skills below 0.5% of total lines
 
 CANONICALIZE_PROMPT = """You merge duplicate and closely-related technical skills into canonical forms.
 
-Given a list of skills extracted from code, identify groups that refer to the same underlying technology and pick one canonical name for each group.
+Given a list of skills extracted from code, identify groups that refer to the same
+underlying technology and pick one canonical name for each group.
 
-MERGE these kinds of duplicates:
-- Sub-features into their parent: "useState", "useEffect", "React Hooks", "JSX" -> "React"
-- API wrappers into the library: "pd.DataFrame", "DataFrame Operations" -> "pandas"
-- Technique variants: "QLoRA", "LoRA adapters" -> "LoRA"
-- Synonyms: "Containerization" -> "Docker" (if Docker is in the list)
-- Partial overlaps: "JWT", "JSON Web Token" -> "JWT"
+MERGE only true duplicates — different names for the SAME thing:
+- Sub-features into their parent: "useState", "useEffect", "JSX" → "React"
+- API wrappers into the library: "pd.DataFrame", "DataFrame Operations" → "pandas"
+- Casing/spelling variants: "numpy" → "NumPy", "pytorch" → "PyTorch"
+- Technique variants: "QLoRA", "LoRA adapters" → "LoRA"
+- Synonyms: "JSON Web Token" → "JWT"
 
-DO NOT MERGE genuinely different technologies:
-- "React" and "Vue" — different frameworks
-- "Docker" and "Kubernetes" — related but distinct
-- "pandas" and "NumPy" — different libraries
-- "FastAPI" and "Flask" — different frameworks
-- "PostgreSQL" and "Redis" — different databases
-- "LoRA" and "RAG" — different AI techniques
+NEVER merge a named library/tool into a generic category:
+- "SQLAlchemy" is NOT a duplicate of "SQL" or "Database" — it's a specific ORM library
+- "NumPy" is NOT "Data Engineering" — it's a specific library
+- "pytest" is NOT "Testing" — it's a specific test framework
+- "requests" is NOT "HTTP Requests" — it's a specific library
+- "FFmpeg" is NOT "Video Processing" — it's a specific tool
+- "Flask" is NOT "Web Frameworks" — it's a specific framework
+
+The canonical name should ALWAYS be the most specific named technology, never a category.
+When in doubt, do NOT merge — leave them as separate single-member groups.
 
 Use standard capitalization (e.g., "FastAPI", "NumPy", "PyTorch", "LangChain").
 
@@ -49,21 +59,26 @@ Every input skill must appear in exactly one group. A skill with no merge partne
 
 GENERIC_FILTER_PROMPT = """You filter a software engineer's skill list for their public profile.
 
-KEEP skills specific enough for a recruiter to search for:
-- Named frameworks/libraries: "React", "FastAPI", "pandas", "LangChain", "PyTorch"
-- Named platforms/infrastructure: "Docker", "Kubernetes", "Redis", "PostgreSQL", "AWS S3"
-- Specific techniques: "RAG", "LoRA", "Fine-Tuning", "Function Calling", "OAuth"
-- Concrete disciplines: "Machine Learning", "Computer Vision", "Web Scraping", "Authentication"
+DECISION PRINCIPLE: KEEP a skill if a hiring manager would use it as a search term when
+looking for candidates. DROP it if it describes what every programmer does regardless
+of their specialization.
 
-DROP skills that are too generic or trivially expected:
-- Generic programming concepts: "Error Handling", "Data Processing", "OOP"
-- Vague umbrellas: "Web Development", "Backend Development", "API Design", "Code Quality"
-- Language features as skills: "List Comprehension", "Async/Await", "Type Hinting", "Decorators"
-- Trivially common: "Logging", "Configuration", "Environment Variables", "JSON"
-- Overly broad: "Data Structures", "Algorithms", "String Manipulation", "File I/O"
+FREQUENCY DATA: Each skill may include chunk frequency (what % of code snippets returned
+it) and language spread (how many file types). Use these as signal:
+  - <5% freq, 1 language → specialized, lean KEEP
+  - >20% freq, 3+ languages → likely a generic pattern, lean DROP
+  - High freq in 1 language → core stack technology, KEEP (e.g. React in JSX)
 
-When uncertain, DROP. A shorter, sharper profile is better.
+EXAMPLES (apply the principle, not these specific lists):
+  KEEP: "NetworkX" (named library), "Machine Learning" (hiring managers search for it),
+        "Graph Theory" (domain expertise), "RAG" (specific technique), "Docker" (platform),
+        "FastAPI" (framework), "LoRA" (ML technique), "Web Scraping" (searchable specialty)
+  DROP: "Error Handling" (every codebase), "Data Processing" (too vague to search),
+        "OOP" (universal pattern), "Async/Await" (language feature, not a skill),
+        "Web Development" (vague umbrella), "JSON" (trivial data format),
+        "Logging" (not a differentiator), "File I/O" (every programmer does this)
 
+Return skill names only (without any frequency annotations).
 Return ONLY JSON: {"keep": ["Skill1", ...], "drop": ["Skill3", ...]}
 Every input skill must appear in exactly one list."""
 
@@ -155,16 +170,68 @@ def _canonicalize_batch(skills, model_data):
     return mapping
 
 
-def _filter_generics_batch(skills, model_data):
+def _filter_generics_batch(skills, model_data, chunk_stats=None):
     """Decide which skills are too generic. Returns set of skills to keep."""
-    result = _llm_call(
-        model_data, GENERIC_FILTER_PROMPT,
-        f"Filter these skills:\n{json.dumps(skills)}",
-    )
+    if chunk_stats:
+        labeled = []
+        for s in skills:
+            cs = chunk_stats.get(s)
+            if cs:
+                freq_pct = f"{cs['freq']:.0%}"
+                n_langs = cs['langs']
+                labeled.append(f"{s} ({freq_pct} of chunks, {n_langs} lang{'s' if n_langs != 1 else ''})")
+            else:
+                labeled.append(s)
+        user_content = f"Filter these skills:\n{json.dumps(labeled)}"
+    else:
+        user_content = f"Filter these skills:\n{json.dumps(skills)}"
+
+    result = _llm_call(model_data, GENERIC_FILTER_PROMPT, user_content)
     keep = result.get("keep", [])
     if isinstance(keep, list) and keep:
-        return {s for s in keep if isinstance(s, str)}
+        skill_set = set(skills)
+        keep_set = set()
+        for s in keep:
+            if not isinstance(s, str):
+                continue
+            name = s.split(" (")[0].strip()
+            if name in skill_set:
+                keep_set.add(name)
+        return keep_set if keep_set else set(skills)
     return set(skills)
+
+
+def _case_insensitive_premerge(candidates):
+    """Merge case variants (e.g. numpy→NumPy) before LLM canonicalization.
+
+    Picks the variant with the most non-lowercase characters as canonical,
+    preferring the higher-scored variant as tiebreaker.
+    """
+    groups = {}
+    for skill, score in candidates.items():
+        key = skill.lower()
+        if key not in groups:
+            groups[key] = []
+        groups[key].append((skill, score))
+
+    chain = {}
+    merged = {}
+    for key, variants in groups.items():
+        if len(variants) == 1:
+            skill, score = variants[0]
+            chain[skill] = skill
+            merged[skill] = score
+            continue
+        # Pick canonical: most uppercase chars, then highest score
+        variants.sort(key=lambda x: (-sum(1 for c in x[0] if c.isupper()), -x[1]))
+        canon = variants[0][0]
+        total = 0
+        for skill, score in variants:
+            chain[skill] = canon
+            total += score
+        merged[canon] = total
+
+    return chain, merged
 
 
 def _hierarchical_canonicalize(candidates, model_data):
@@ -174,8 +241,13 @@ def _hierarchical_canonicalize(candidates, model_data):
       - chain: {original_skill: final_canonical}
       - merged_scores: {canonical: summed_score}
     """
-    chain = {s: s for s in candidates}
-    current = dict(candidates)
+    # Pre-merge case variants in code (don't rely on LLM for numpy→NumPy)
+    premerge_chain, premerged = _case_insensitive_premerge(candidates)
+    if len(premerged) < len(candidates):
+        print(f"  Pre-merged {len(candidates)} → {len(premerged)} (case variants)", flush=True)
+
+    chain = dict(premerge_chain)
+    current = dict(premerged)
     max_rounds = 5
 
     for round_num in range(max_rounds):
@@ -209,7 +281,92 @@ def _hierarchical_canonicalize(candidates, model_data):
     return chain, current
 
 
-def filter_profile_skills(merged_skills, model_data, cache_path=None):
+# ── Chunk-frequency analysis (TF-IDF analog) ──────────────────────────────
+
+def _compute_chunk_stats(profiles):
+    """Compute per-skill chunk frequency from c2s data in profiles.
+
+    Returns (total_chunks, skill_chunks, skill_langs) where:
+      - total_chunks: int, total code snippets analyzed
+      - skill_chunks: {skill: int}, how many chunks returned each skill
+      - skill_langs: {skill: set}, which file extensions each skill appeared in
+    """
+    total_chunks = 0
+    skill_chunks = defaultdict(int)
+    skill_langs = defaultdict(set)
+
+    for profile in profiles:
+        stats = profile.get("stats", {}) or {}
+        for ext, lang_block in (stats.get("langs", {}) or {}).items():
+            yyyymm = (lang_block or {}).get("yyyymm", {}) or {}
+            for month_data in yyyymm.values():
+                if not isinstance(month_data, dict):
+                    continue
+                total_chunks += int(month_data.get("sig_cont", 0) or 0)
+                for key, val in month_data.items():
+                    if not key.startswith("c2s::") or not isinstance(val, dict):
+                        continue
+                    for skill, entry in val.items():
+                        if isinstance(entry, (list, tuple)) and len(entry) >= 1:
+                            skill_chunks[skill] += int(entry[0] or 0)
+                            skill_langs[skill].add(ext)
+
+    return total_chunks, dict(skill_chunks), {s: set(v) for s, v in skill_langs.items()}
+
+
+def _remap_chunk_stats(total_chunks, raw_chunks, raw_langs, canonical_chain):
+    """Remap chunk stats through canonical mapping, merging counts."""
+    if not total_chunks or not raw_chunks:
+        return None
+
+    merged_chunks = defaultdict(int)
+    merged_langs = defaultdict(set)
+
+    for skill in raw_chunks:
+        canon = canonical_chain.get(skill, skill)
+        merged_chunks[canon] += raw_chunks[skill]
+        merged_langs[canon].update(raw_langs.get(skill, set()))
+
+    return {
+        skill: {
+            "chunks": merged_chunks[skill],
+            "freq": merged_chunks[skill] / total_chunks,
+            "langs": len(merged_langs[skill]),
+            "idf": math.log(total_chunks / max(merged_chunks[skill], 1)),
+        }
+        for skill in merged_chunks
+    }
+
+
+def _looks_like_named_tool(name):
+    """Heuristic: does this skill name look like a specific library/tool?
+
+    Returns True for names like NumPy, SQLAlchemy, Three.js, scikit-learn,
+    psycopg2, FastAPI — proper nouns that are almost certainly real packages.
+    Returns False for plain English phrases like "Error Handling", "Logging".
+    """
+    # Contains a dot → likely a package (Three.js, Chart.js)
+    if "." in name:
+        return True
+    # Contains a digit → likely a package/version (psycopg2, SAM2, h5py)
+    if any(c.isdigit() for c in name):
+        return True
+    # Has medial uppercase (camelCase/PascalCase with lowercase): NumPy, SQLAlchemy, FastAPI, PyTorch
+    # But not ALL-CAPS acronyms like "OOP", "SMTP" or plain "Title Case" like "Error Handling"
+    stripped = name.replace(" ", "").replace("-", "")
+    has_lower = any(c.islower() for c in stripped)
+    has_upper_after_start = any(c.isupper() for c in stripped[1:])
+    if has_lower and has_upper_after_start and " " not in name:
+        return True
+    # Hyphenated package names: scikit-learn, react-select
+    if "-" in name and name[0].islower():
+        return True
+    return False
+
+
+# ── Public API ───────────────────────────────────────────────────────────────
+
+def filter_profile_skills(merged_skills, model_data, cache_path=None, profiles=None):
     """Filter + canonicalize skill dict for job-search relevance.
 
     Returns ``(language_drops, llm_drops, canonical_map, surviving_scores)``.
@@ -221,6 +378,14 @@ def filter_profile_skills(merged_skills, model_data, cache_path=None):
     if not candidates:
         return language_drops, set(), {}, {}
 
+    # Compute chunk stats from profiles (TF-IDF context for the filter)
+    total_chunks, raw_chunks, raw_langs = (0, {}, {})
+    if profiles:
+        total_chunks, raw_chunks, raw_langs = _compute_chunk_stats(profiles)
+        if total_chunks:
+            print(f"  Chunk stats: {total_chunks} total snippets, "
+                  f"{len(raw_chunks)} skills observed.", flush=True)
+
     cache_data = _load_cache(cache_path)
     model_key = model_data.get("model", "unknown")
     generic_cache = cache_data.setdefault("generic_filter", {}).setdefault(model_key, {})
@@ -229,7 +394,13 @@ def filter_profile_skills(merged_skills, model_data, cache_path=None):
     print(f"  Canonicalizing {len(candidates)} skills...", flush=True)
     chain, merged_scores = _hierarchical_canonicalize(candidates, model_data)
 
+    # Remap chunk stats through canonical mapping
+    chunk_stats = None
+    if total_chunks and raw_chunks:
+        chunk_stats = _remap_chunk_stats(total_chunks, raw_chunks, raw_langs, chain)
+
     # Filter generics (cached per-skill)
+    auto_keep = set()
     canonical_skills = sorted(merged_scores.keys())
     needs_query = [s for s in canonical_skills if s not in generic_cache]
 
@@ -239,7 +410,7 @@ def filter_profile_skills(merged_skills, model_data, cache_path=None):
                    for i in range(0, len(needs_query), CANON_BATCH_SIZE)]
         for idx, batch in enumerate(batches):
             t0 = time.time()
-            keep_set = _filter_generics_batch(batch, model_data)
+            keep_set = _filter_generics_batch(batch, model_data, chunk_stats=chunk_stats)
             for s in batch:
                 generic_cache[s] = s in keep_set
             print(f"    filter {idx + 1}/{len(batches)}  "
@@ -247,6 +418,20 @@ def filter_profile_skills(merged_skills, model_data, cache_path=None):
         _save_cache(cache_path, cache_data)
 
     keep_canonicals = {s for s in canonical_skills if generic_cache.get(s, True)}
+
+    # Rescue named tools the LLM incorrectly dropped.
+    # Heuristic: if the name looks like a proper noun / package name
+    # (mixed case, dots, digits), it's likely a real tool, not a concept.
+    rescued = set()
+    for s in canonical_skills:
+        if s in keep_canonicals:
+            continue
+        if _looks_like_named_tool(s):
+            rescued.add(s)
+            keep_canonicals.add(s)
+    if rescued:
+        print(f"  Rescued {len(rescued)} named tools the LLM dropped: "
+              f"{', '.join(sorted(rescued))}", flush=True)
 
     llm_drops = set()
     canonical_map = {}
@@ -261,8 +446,25 @@ def filter_profile_skills(merged_skills, model_data, cache_path=None):
         canonical_map[orig] = canon
         surviving_scores[canon] = surviving_scores.get(canon, 0) + candidates[orig]
 
+    # Drop skills below a minimum line-count threshold (0.2% of total lines)
+    if surviving_scores:
+        total_lines = sum(surviving_scores.values())
+        min_lines = total_lines * MIN_SCORE_PCT
+        before = len(surviving_scores)
+        low_score = {s for s, v in surviving_scores.items() if v < min_lines}
+        if low_score:
+            for s in low_score:
+                del surviving_scores[s]
+            # Move their originals to llm_drops
+            for orig, canon in canonical_map.items():
+                if canon in low_score:
+                    llm_drops.add(orig)
+            canonical_map = {o: c for o, c in canonical_map.items() if c not in low_score}
+            print(f"  Dropped {len(low_score)} skills below {min_lines:.0f} lines "
+                  f"({MIN_SCORE_PCT:.1%} of {total_lines:.0f} total).", flush=True)
+
     kept = len(surviving_scores)
     dropped = len(merged_scores) - kept
-    print(f"  Kept {kept} skills, dropped {dropped} generic concepts.", flush=True)
+    print(f"  Kept {kept} skills, dropped {dropped} total.", flush=True)
 
     return language_drops, llm_drops, canonical_map, surviving_scores

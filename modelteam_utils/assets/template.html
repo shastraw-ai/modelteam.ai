@@ -51,38 +51,20 @@
 
 <section class="card tab-panel" role="tabpanel" data-panel="skills">
   <div class="card-head">
-    <h2>Top skills</h2>
-    <div class="card-sub">extracted from your code · click any skill to see its timeline</div>
-  </div>
-  <div class="chart-wrap chart-wrap-tall">
-    <canvas id="chart-skills"></canvas>
+    <h2>Skills</h2>
+    <div class="card-sub">grouped by domain · lines authored per quarter</div>
   </div>
   <div class="chips" id="skill-chips"></div>
   <div class="empty" id="skills-empty" hidden>No skills extracted yet.</div>
-
-  <hr class="divider">
-
-  <div class="detail-head">
-    <div class="kicker">timeline</div>
-    <h3 class="detail-title">
-      <span id="skill-detail-name">—</span>
-    </h3>
-    <div class="card-sub">lines of code involving this skill, per quarter</div>
-  </div>
-  <div class="chart-wrap">
-    <canvas id="chart-skill-detail"></canvas>
-  </div>
-  <div class="empty" id="skill-detail-empty" hidden>
-    No quarterly timeline available for this skill.
-  </div>
+  <div id="skill-group-charts"></div>
 </section>
 
 <section class="card tab-panel" role="tabpanel" data-panel="langs" hidden>
   <div class="card-head">
-    <h2>Top languages</h2>
-    <div class="card-sub">total lines added · click any language to see its timeline</div>
+    <h2>Languages</h2>
+    <div class="card-sub">lines of code per quarter · click a chip to see its timeline</div>
   </div>
-  <div class="chart-wrap chart-wrap-tall">
+  <div class="chart-wrap">
     <canvas id="chart-langs"></canvas>
   </div>
   <div class="chips" id="lang-chips"></div>

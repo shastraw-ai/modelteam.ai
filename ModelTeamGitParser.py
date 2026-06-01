@@ -108,7 +108,7 @@ class ModelTeamGitParser:
         total_deleted = 0
         file_line_stats = {}  # Dictionary to store file line stats
         add_pdf_stats = False
-        if args and args.user_emails:
+        if args and args.pdf and args.user_emails:
             if self.display_name:
                 add_pdf_stats = curr_user == self.display_name
             else:
@@ -687,6 +687,7 @@ if __name__ == "__main__":
     parser.add_argument('--team_name', type=str, help='Team Name', default=None)
     parser.add_argument('--num_years', type=int, help='Number of years to consider', default=2)
     parser.add_argument('--show_progress', default=False, help='Show progress bar', action='store_true')
+    parser.add_argument('--pdf', default=False, help='Collect PDF report stats (deprecated)', action='store_true')
 
     # These are advanced options that's usually used for internal use
     parser.add_argument('--skip_model_eval', default=False, help='Skip model evaluation', action='store_true')

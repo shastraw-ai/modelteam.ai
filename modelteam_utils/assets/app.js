@@ -7,6 +7,14 @@
   const GRID = 'rgba(139, 148, 158, 0.12)';
   const TICK = '#8b949e';
 
+  const MULTI_COLORS = [
+    '#6366f1', '#06b6d4', '#f59e0b', '#ef4444', '#10b981',
+    '#8b5cf6', '#ec4899', '#64748b', '#0ea5e9', '#84cc16',
+  ];
+
+  // Max skills drawn in a single line chart; larger groups split across charts.
+  const MAX_SKILLS_PER_CHART = 5;
+
   const TOOLTIP = {
     backgroundColor: '#0d1117',
     borderColor: '#30363d',
@@ -14,7 +22,7 @@
     titleColor: '#e6edf3',
     bodyColor: '#8b949e',
     padding: 10,
-    displayColors: false,
+    displayColors: true,
   };
 
   function setText(key, value) {
@@ -27,14 +35,13 @@
     return (n || 0).toLocaleString('en-US');
   }
 
-  function makeXGradient(ctx, area, c1, c2) {
-    const g = ctx.createLinearGradient(area.left, 0, area.right, 0);
-    g.addColorStop(0, c1); g.addColorStop(1, c2);
-    return g;
+  function fmtLines(v) {
+    if (v >= 1000) return (v / 1000).toFixed(v >= 10000 ? 0 : 1) + 'k';
+    return v;
   }
 
-  function makeYGradient(ctx, area, c1, c2) {
-    const g = ctx.createLinearGradient(0, area.bottom, 0, area.top);
+  function makeXGradient(ctx, area, c1, c2) {
+    const g = ctx.createLinearGradient(area.left, 0, area.right, 0);
     g.addColorStop(0, c1); g.addColorStop(1, c2);
     return g;
   }
@@ -86,61 +93,58 @@
     .map(function (k) { return [k, skills[k]]; })
     .sort(function (a, b) { return b[1] - a[1]; });
 
-  let skillDetailChart = null;
-  let activeSkillEl = null;
+  function skillHasData(skill) {
+    var m = skillQtr[skill] || {};
+    return quarters.some(function (q) { return (m[q] || 0) > 0; });
+  }
 
-  function renderSkillDetail(skill) {
-    const buckets = skillQtr[skill] || {};
-    const series = quarters.map(function (q) { return buckets[q] || 0; });
-    const hasData = series.some(function (v) { return v > 0; });
+  function renderGroupChart(container, name, groupSkills, colorOffset) {
+    var head = document.createElement('div');
+    head.className = 'detail-head';
+    var title = document.createElement('h3');
+    title.className = 'detail-title';
+    title.textContent = name;
+    head.appendChild(title);
+    container.appendChild(head);
 
-    document.getElementById('skill-detail-name').textContent = skill;
+    var wrap = document.createElement('div');
+    wrap.className = 'chart-wrap';
+    var canvas = document.createElement('canvas');
+    wrap.appendChild(canvas);
+    container.appendChild(wrap);
 
-    const wrap = document.getElementById('chart-skill-detail').parentElement;
-    const empty = document.getElementById('skill-detail-empty');
+    var datasets = groupSkills.map(function (skill, i) {
+      var color = MULTI_COLORS[(colorOffset + i) % MULTI_COLORS.length];
+      return {
+        label: skill,
+        data: quarters.map(function (q) { return (skillQtr[skill] || {})[q] || 0; }),
+        borderColor: color,
+        backgroundColor: color,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        borderWidth: 2,
+        tension: 0.3,
+        fill: false,
+      };
+    });
 
-    if (!hasData) {
-      wrap.style.display = 'none';
-      empty.hidden = false;
-      if (skillDetailChart) { skillDetailChart.destroy(); skillDetailChart = null; }
-      return;
-    }
-    wrap.style.display = '';
-    empty.hidden = true;
-
-    if (skillDetailChart) {
-      skillDetailChart.data.datasets[0].data = series;
-      skillDetailChart.update();
-      return;
-    }
-
-    skillDetailChart = new Chart(document.getElementById('chart-skill-detail'), {
-      type: 'bar',
-      data: {
-        labels: quarters,
-        datasets: [{
-          data: series,
-          backgroundColor: function (ctx) {
-            const c = ctx.chart;
-            const a = c.chartArea;
-            if (!a) return ACCENT_1;
-            return makeYGradient(c.ctx, a, ACCENT_2, ACCENT_1);
-          },
-          borderRadius: 4,
-          borderSkipped: false,
-          barPercentage: 0.62,
-          categoryPercentage: 0.86,
-        }],
-      },
+    new Chart(canvas, {
+      type: 'line',
+      data: { labels: quarters, datasets: datasets },
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        animation: { duration: 500, easing: 'easeOutQuart' },
+        animation: { duration: 600, easing: 'easeOutQuart' },
+        interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { display: false },
+          legend: {
+            display: true,
+            position: 'top',
+            labels: { color: '#e6edf3', usePointStyle: true, pointStyle: 'circle', padding: 14, font: { size: 12 } },
+          },
           tooltip: Object.assign({}, TOOLTIP, {
             callbacks: {
-              label: function (item) { return fmtInt(item.raw) + ' lines'; },
+              label: function (item) { return item.dataset.label + ': ' + fmtInt(item.raw) + ' lines'; },
             },
           }),
         },
@@ -155,134 +159,91 @@
             border: { display: false },
             ticks: {
               color: TICK, font: { size: 11 },
-              callback: function (v) {
-                if (v >= 1000) return (v / 1000).toFixed(v >= 10000 ? 0 : 1) + 'k';
-                return v;
-              },
+              callback: function (v) { return fmtLines(v); },
             },
           },
         },
       },
     });
-  }
-
-  function markActiveSkill(skill) {
-    if (activeSkillEl) activeSkillEl.classList.remove('active');
-    activeSkillEl = document.querySelector('.chip[data-skill="' + CSS.escape(skill) + '"]');
-    if (activeSkillEl) activeSkillEl.classList.add('active');
   }
 
   if (skillEntries.length === 0) {
     document.getElementById('skills-empty').hidden = false;
-    document.getElementById('chart-skills').parentElement.style.display = 'none';
-    document.getElementById('chart-skill-detail').parentElement.style.display = 'none';
-    document.getElementById('skill-detail-empty').hidden = false;
   } else {
-    const topN = skillEntries.slice(0, 25);
-    const rest = skillEntries.slice(25);
-
-    const skillsCanvas = document.getElementById('chart-skills');
-
-    new Chart(skillsCanvas, {
-      type: 'bar',
-      data: {
-        labels: topN.map(function (e) { return e[0]; }),
-        datasets: [{
-          data: topN.map(function (e) { return e[1]; }),
-          backgroundColor: function (ctx) {
-            const chart = ctx.chart;
-            const area = chart.chartArea;
-            if (!area) return ACCENT_1;
-            return makeXGradient(chart.ctx, area, ACCENT_1, ACCENT_2);
-          },
-          borderRadius: 4,
-          borderSkipped: false,
-          barPercentage: 0.78,
-          categoryPercentage: 0.86,
-        }],
-      },
-      options: {
-        indexAxis: 'y',
-        responsive: true,
-        maintainAspectRatio: false,
-        animation: { duration: 700, easing: 'easeOutQuart' },
-        onHover: function (e, els) {
-          e.native.target.style.cursor = els.length ? 'pointer' : 'default';
-        },
-        onClick: function (evt, els, chart) {
-          if (!els.length) return;
-          const skill = chart.data.labels[els[0].index];
-          renderSkillDetail(skill);
-          markActiveSkill(skill);
-        },
-        plugins: {
-          legend: { display: false },
-          tooltip: Object.assign({}, TOOLTIP, {
-            callbacks: {
-              label: function (item) { return 'score ' + fmtInt(item.raw); },
-            },
-          }),
-        },
-        scales: {
-          x: {
-            grid: { color: GRID, drawTicks: false },
-            border: { display: false },
-            ticks: { color: TICK, font: { size: 11 } },
-          },
-          y: {
-            grid: { display: false },
-            border: { display: false },
-            ticks: { color: '#e6edf3', font: { size: 13 } },
-          },
-        },
-      },
+    // Skill chips: a static at-a-glance list (most important first).
+    var chipBox = document.getElementById('skill-chips');
+    skillEntries.forEach(function (e) {
+      var chip = document.createElement('span');
+      chip.className = 'chip';
+      var label = document.createElement('span');
+      label.textContent = e[0];
+      chip.appendChild(label);
+      chipBox.appendChild(chip);
     });
 
-    const chipBox = document.getElementById('skill-chips');
-    function addChip(name, value) {
-      const chip = document.createElement('span');
-      chip.className = 'chip';
-      chip.dataset.skill = name;
-      const label = document.createElement('span');
-      label.textContent = name;
-      const score = document.createElement('span');
-      score.className = 'score';
-      score.textContent = fmtInt(value);
-      chip.appendChild(label);
-      chip.appendChild(score);
-      chip.addEventListener('click', function () {
-        renderSkillDetail(name);
-        markActiveSkill(name);
-      });
-      chipBox.appendChild(chip);
-    }
-    topN.forEach(function (e) { addChip(e[0], e[1]); });
-    rest.forEach(function (e) { addChip(e[0], e[1]); });
+    // Only skills with quarterly activity can be charted.
+    var activeSkills = {};
+    skillEntries.forEach(function (e) {
+      if (skillHasData(e[0])) activeSkills[e[0]] = true;
+    });
 
-    const initialSkill = (skillEntries.find(function (e) {
-      const m = skillQtr[e[0]] || {};
-      return Object.keys(m).some(function (q) { return (m[q] || 0) > 0; });
-    }) || skillEntries[0])[0];
-    renderSkillDetail(initialSkill);
-    markActiveSkill(initialSkill);
+    // Use server-provided groups; otherwise fall back to one default group.
+    var rawGroups = (data.skill_groups && data.skill_groups.length)
+      ? data.skill_groups
+      : [{ name: 'Skills', skills: skillEntries.map(function (e) { return e[0]; }) }];
+
+    var groups = rawGroups.map(function (g) {
+      return {
+        name: g.name,
+        skills: (g.skills || []).filter(function (s) { return activeSkills[s]; }),
+      };
+    }).filter(function (g) { return g.skills.length; });
+
+    // Split any group with more than MAX_SKILLS_PER_CHART skills into multiple
+    // line charts so a single chart never gets too crowded.
+    var chartPanels = [];
+    groups.forEach(function (g) {
+      if (g.skills.length <= MAX_SKILLS_PER_CHART) {
+        chartPanels.push({ name: g.name, skills: g.skills });
+        return;
+      }
+      var nParts = Math.ceil(g.skills.length / MAX_SKILLS_PER_CHART);
+      for (var p = 0; p < nParts; p++) {
+        chartPanels.push({
+          name: p === 0 ? g.name : g.name + ' [contd.]',
+          skills: g.skills.slice(p * MAX_SKILLS_PER_CHART, (p + 1) * MAX_SKILLS_PER_CHART),
+        });
+      }
+    });
+
+    if (!chartPanels.length) {
+      document.getElementById('skills-empty').hidden = false;
+    } else {
+      var container = document.getElementById('skill-group-charts');
+      var colorIdx = 0;
+      chartPanels.forEach(function (panel) {
+        renderGroupChart(container, panel.name, panel.skills, colorIdx);
+        colorIdx += panel.skills.length;
+      });
+    }
   }
 
   // --- Languages tab ------------------------------------------------------
 
-  const langStats = data.lang_qtr_added || {};
-  const langNames = Object.keys(langStats);
+  var langStats = data.lang_qtr_added || {};
+  var langNames = Object.keys(langStats);
 
-  let langDetailChart = null;
+  var langDetailChart = null;
 
   function renderLangDetail(name) {
-    const buckets = langStats[name] || {};
-    const series = quarters.map(function (q) { return buckets[q] || 0; });
-    const hasData = series.some(function (v) { return v > 0; });
+    var buckets = langStats[name] || {};
+    var series = quarters.map(function (q) { return buckets[q] || 0; });
+    var hasData = series.some(function (v) { return v > 0; });
 
     document.getElementById('lang-detail-name').textContent = name;
 
-    const wrap = document.getElementById('chart-lang-detail').parentElement;
-    const empty = document.getElementById('lang-detail-empty');
+    var wrap = document.getElementById('chart-lang-detail').parentElement;
+    var empty = document.getElementById('lang-detail-empty');
 
     if (!hasData) {
       wrap.style.display = 'none';
@@ -300,21 +261,18 @@
     }
 
     langDetailChart = new Chart(document.getElementById('chart-lang-detail'), {
-      type: 'bar',
+      type: 'line',
       data: {
         labels: quarters,
         datasets: [{
           data: series,
-          backgroundColor: function (ctx) {
-            const c = ctx.chart;
-            const a = c.chartArea;
-            if (!a) return ACCENT_2;
-            return makeYGradient(c.ctx, a, ACCENT_2, ACCENT_1);
-          },
-          borderRadius: 4,
-          borderSkipped: false,
-          barPercentage: 0.62,
-          categoryPercentage: 0.86,
+          borderColor: ACCENT_2,
+          backgroundColor: ACCENT_2,
+          pointRadius: 4,
+          pointHoverRadius: 6,
+          borderWidth: 2,
+          tension: 0.3,
+          fill: false,
         }],
       },
       options: {
@@ -324,6 +282,7 @@
         plugins: {
           legend: { display: false },
           tooltip: Object.assign({}, TOOLTIP, {
+            displayColors: false,
             callbacks: {
               label: function (item) { return fmtInt(item.raw) + ' lines'; },
             },
@@ -340,10 +299,7 @@
             border: { display: false },
             ticks: {
               color: TICK, font: { size: 11 },
-              callback: function (v) {
-                if (v >= 1000) return (v / 1000).toFixed(v >= 10000 ? 0 : 1) + 'k';
-                return v;
-              },
+              callback: function (v) { return fmtLines(v); },
             },
           },
         },
@@ -351,7 +307,7 @@
     });
   }
 
-  let activeLangEl = null;
+  var activeLangEl = null;
   function markActiveLang(name) {
     if (activeLangEl) activeLangEl.classList.remove('active');
     activeLangEl = document.querySelector('.chip[data-lang="' + CSS.escape(name) + '"]');
@@ -364,86 +320,80 @@
     document.getElementById('chart-lang-detail').parentElement.style.display = 'none';
     document.getElementById('lang-detail-empty').hidden = false;
   } else {
-    const langTotals = langNames.map(function (name) {
-      let total = 0;
-      const m = langStats[name];
+    var langTotals = langNames.map(function (name) {
+      var total = 0;
+      var m = langStats[name];
       Object.keys(m).forEach(function (q) { total += m[q] || 0; });
       return [name, total];
     });
     langTotals.sort(function (a, b) { return b[1] - a[1]; });
 
-    const topN = langTotals.slice(0, 25);
-    const rest = langTotals.slice(25);
+    var topLangs = langTotals.filter(function (e) { return e[1] > 0; }).slice(0, 7);
 
+    // Multi-series line chart: all top languages over quarters
     new Chart(document.getElementById('chart-langs'), {
-      type: 'bar',
+      type: 'line',
       data: {
-        labels: topN.map(function (e) { return e[0]; }),
-        datasets: [{
-          data: topN.map(function (e) { return e[1]; }),
-          backgroundColor: function (ctx) {
-            const c = ctx.chart;
-            const a = c.chartArea;
-            if (!a) return ACCENT_2;
-            return makeXGradient(c.ctx, a, ACCENT_1, ACCENT_2);
-          },
-          borderRadius: 4,
-          borderSkipped: false,
-          barPercentage: 0.78,
-          categoryPercentage: 0.86,
-        }],
+        labels: quarters,
+        datasets: topLangs.map(function (entry, i) {
+          var name = entry[0];
+          var color = MULTI_COLORS[i % MULTI_COLORS.length];
+          return {
+            label: name,
+            data: quarters.map(function (q) { return (langStats[name] || {})[q] || 0; }),
+            borderColor: color,
+            backgroundColor: color,
+            pointRadius: 3,
+            pointHoverRadius: 5,
+            borderWidth: 2,
+            tension: 0.3,
+            fill: false,
+          };
+        }),
       },
       options: {
-        indexAxis: 'y',
         responsive: true,
         maintainAspectRatio: false,
         animation: { duration: 700, easing: 'easeOutQuart' },
-        onHover: function (e, els) {
-          e.native.target.style.cursor = els.length ? 'pointer' : 'default';
-        },
-        onClick: function (evt, els, chart) {
-          if (!els.length) return;
-          const name = chart.data.labels[els[0].index];
-          renderLangDetail(name);
-          markActiveLang(name);
-        },
+        interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { display: false },
+          legend: {
+            display: true,
+            position: 'top',
+            labels: { color: '#e6edf3', usePointStyle: true, pointStyle: 'circle', padding: 16, font: { size: 12 } },
+          },
           tooltip: Object.assign({}, TOOLTIP, {
             callbacks: {
-              label: function (item) { return fmtInt(item.raw) + ' lines'; },
+              label: function (item) { return item.dataset.label + ': ' + fmtInt(item.raw) + ' lines'; },
             },
           }),
         },
         scales: {
           x: {
+            grid: { display: false },
+            border: { display: false },
+            ticks: { color: TICK, font: { size: 11 } },
+          },
+          y: {
             grid: { color: GRID, drawTicks: false },
             border: { display: false },
             ticks: {
               color: TICK, font: { size: 11 },
-              callback: function (v) {
-                if (v >= 1000) return (v / 1000).toFixed(v >= 10000 ? 0 : 1) + 'k';
-                return v;
-              },
+              callback: function (v) { return fmtLines(v); },
             },
-          },
-          y: {
-            grid: { display: false },
-            border: { display: false },
-            ticks: { color: '#e6edf3', font: { size: 13 } },
           },
         },
       },
     });
 
-    const langChipBox = document.getElementById('lang-chips');
+    var langChipBox = document.getElementById('lang-chips');
     function addLangChip(name, value) {
-      const chip = document.createElement('span');
+      var chip = document.createElement('span');
       chip.className = 'chip';
       chip.dataset.lang = name;
-      const label = document.createElement('span');
+      var label = document.createElement('span');
       label.textContent = name;
-      const score = document.createElement('span');
+      var score = document.createElement('span');
       score.className = 'score';
       score.textContent = fmtInt(value);
       chip.appendChild(label);
@@ -454,10 +404,9 @@
       });
       langChipBox.appendChild(chip);
     }
-    topN.forEach(function (e) { addLangChip(e[0], e[1]); });
-    rest.forEach(function (e) { addLangChip(e[0], e[1]); });
+    langTotals.forEach(function (e) { addLangChip(e[0], e[1]); });
 
-    renderLangDetail(topN[0][0]);
-    markActiveLang(topN[0][0]);
+    renderLangDetail(topLangs[0][0]);
+    markActiveLang(topLangs[0][0]);
   }
 })();

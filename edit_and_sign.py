@@ -15,11 +15,10 @@ from modelteam_utils.ai_utils import check_ollama_ready, init_ollama, rank_skill
 from modelteam_utils.constants import USER, REPO, STATS, SKILLS, RELEVANT, NOT_RELEVANT, PROFILES, \
     NR_SKILLS, TIMESTAMP, MT_PROFILE_JSON, PDF_STATS_JSON
 from modelteam_utils.html_report import generate_html_report
-from modelteam_utils.md_report import generate_md_report
+from modelteam_utils.md_report import compute_skill_groups, generate_md_report
 from modelteam_utils.qt_style import APP_STYLESHEET
 from modelteam_utils.skill_filter import CACHE_FILENAME, filter_profile_skills
 from modelteam_utils.utils import filter_skills, get_extension_to_language_map, load_skill_config, trunc_string
-from modelteam_utils.viz_utils import generate_pdf_report
 
 display_names = {}
 
@@ -230,7 +229,8 @@ def edit_profile(merged_profile, choices_file, cli_mode, model_data=None, cache_
     canonical_map = {}
     if model_data:
         lang_drops, llm_drops, canonical_map, surviving_scores = filter_profile_skills(
-            skills, model_data, cache_path
+            skills, model_data, cache_path,
+            profiles=merged_profile[PROFILES],
         )
         pre_filter_drops = lang_drops | llm_drops
         skills = surviving_scores
@@ -413,10 +413,7 @@ def display_t_and_c(email_id):
     return res.lower()
 
 
-def print_message(pdf_file, html_file, md_file=None):
-    print("📄 PDF Report Generated!")
-    print(f"📂 Saved at: {pdf_file}")
-    print()
+def print_message(html_file, md_file=None, pdf_file=None):
     print("🌐 HTML Profile Generated!")
     print("✅ Safe to host publicly — contains no repo names, file paths, or commit messages.")
     print(f"📂 Saved at: {html_file}")
@@ -426,6 +423,10 @@ def print_message(pdf_file, html_file, md_file=None):
         print("📝 GitHub Profile README Generated!")
         print(f"📂 Saved at: {md_file}")
         print("   Copy to your GitHub profile repo (username/username) as README.md")
+    if pdf_file:
+        print()
+        print("📄 PDF Report Generated!")
+        print(f"📂 Saved at: {pdf_file}")
 
 
 if __name__ == "__main__":
@@ -433,13 +434,13 @@ if __name__ == "__main__":
     arg_parser.add_argument("--profile_path", type=str, required=True)
     arg_parser.add_argument("--cli_mode", action="store_true", default=False)
     arg_parser.add_argument("--config", type=str, required=False, default="config.ini")
+    arg_parser.add_argument("--pdf", action="store_true", default=False,
+                            help="Generate PDF report (deprecated, disabled by default)")
 
     args = arg_parser.parse_args()
     profile_json = os.path.join(args.profile_path, MT_PROFILE_JSON)
-    pdf_stats_json = os.path.join(args.profile_path, "tmp-stats", PDF_STATS_JSON)
     file_name_without_extension = profile_json.replace(".json", "")
     choices_file = f"{file_name_without_extension}_choices.json"
-    pdf_path = os.path.join(args.profile_path, "pdf")
     config_file = args.config
     config = configparser.ConfigParser()
     config.read(config_file)
@@ -462,10 +463,17 @@ if __name__ == "__main__":
         edited_file = os.path.join(args.profile_path, f"mt_stats_{today}.json")
         print(f"Edited file: {edited_file}")
         apply_choices(merged_profile, choices_file, edited_file, bad_skills, canonical_map)
-        pdf_file = generate_pdf_report(edited_file, pdf_stats_json, pdf_path)
-        html_file = generate_html_report(edited_file, args.profile_path)
-        md_file = generate_md_report(edited_file, args.profile_path, model_data=model_data)
-        print_message(pdf_file, html_file, md_file)
+        skill_groups = compute_skill_groups(edited_file, model_data)
+        html_file = generate_html_report(edited_file, args.profile_path, skill_groups=skill_groups)
+        md_file = generate_md_report(edited_file, args.profile_path,
+                                     model_data=model_data, skill_groups=skill_groups)
+        pdf_file = None
+        if args.pdf:
+            from modelteam_utils.viz_utils import generate_pdf_report
+            pdf_stats_json = os.path.join(args.profile_path, "tmp-stats", PDF_STATS_JSON)
+            pdf_path = os.path.join(args.profile_path, "pdf")
+            pdf_file = generate_pdf_report(edited_file, pdf_stats_json, pdf_path)
+        print_message(html_file, md_file, pdf_file)
     else:
         print("Changes were NOT SAVED. Exiting... Please run the script again.")
         sys.exit(0)

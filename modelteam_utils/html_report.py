@@ -10,13 +10,16 @@ import argparse
 import base64
 import datetime
 import json
+import math
 import os
 from collections import defaultdict
 
 from .constants import (
-    ADDED, DELETED, LANGS, NR_SKILLS, PHC, PROFILES, SKILLS, STATS,
+    ADDED, DELETED, LANGS, NR_SKILLS, PHC, PROFILES,
+    SIGNIFICANT_CONTRIBUTION, SKILLS, STATS,
     TIMESTAMP, TIME_SERIES, USER,
 )
+from .ai_utils import group_skills_by_keyword
 from .utils import get_extension_to_language_map, yyyy_mm_to_quarter
 
 _ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
@@ -59,6 +62,8 @@ def _build_report_data(merged_profile):
     merged_skills = defaultdict(float)
     lang_qtr_added = defaultdict(lambda: defaultdict(int))
     skill_qtr_lines = defaultdict(lambda: defaultdict(int))
+    total_chunks = 0
+    skill_chunk_counts = defaultdict(int)
 
     profiles = merged_profile.get(PROFILES, []) or []
     for profile in profiles:
@@ -81,16 +86,38 @@ def _build_report_data(merged_profile):
                 if qtr not in quarter_set:
                     continue
                 lang_qtr_added[disp][qtr] += int(cell.get(ADDED, 0) or 0)
+                total_chunks += int(cell.get(SIGNIFICANT_CONTRIBUTION, 0) or 0)
                 for key, val in cell.items():
                     if not key.startswith("c2s::") or not isinstance(val, dict):
                         continue
                     for skill, entry in val.items():
-                        if skill in nr or not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                            continue
+                        try:
+                            skill_chunk_counts[skill] += int(entry[0] or 0)
+                        except (TypeError, ValueError):
+                            pass
+                        if skill in nr:
                             continue
                         try:
                             skill_qtr_lines[skill][qtr] += int(entry[1] or 0)
                         except (TypeError, ValueError):
                             continue
+
+    # IDF weighting: downweight skills that appear in many chunks
+    if total_chunks > 1:
+        for skill in merged_skills:
+            chunks = skill_chunk_counts.get(skill, 0)
+            if chunks > 0:
+                merged_skills[skill] *= math.log(total_chunks / chunks)
+        for skill in skill_qtr_lines:
+            chunks = skill_chunk_counts.get(skill, 0)
+            if chunks > 0:
+                idf = math.log(total_chunks / chunks)
+                for qtr in skill_qtr_lines[skill]:
+                    skill_qtr_lines[skill][qtr] = int(
+                        skill_qtr_lines[skill][qtr] * idf
+                    )
 
     active_quarters = sorted({
         q for buckets in lang_qtr_added.values() for q in buckets
@@ -152,14 +179,24 @@ def _render_html(report_data):
             .replace(_PLACEHOLDER_DATA, data_json))
 
 
-def generate_html_report(profile_json, output_dir):
+def generate_html_report(profile_json, output_dir, skill_groups=None):
     """Read the filtered ``mt_stats.json`` and write ``modelteam_profile.html``.
+
+    ``skill_groups`` (a list of ``{"name", "skills"}`` dicts) drives the grouped
+    skill charts; when omitted the page falls back to a single default group.
 
     Returns the absolute path to the written HTML file.
     """
     with open(profile_json, "r", encoding="utf-8") as f:
         merged_profile = json.load(f)
     report_data = _build_report_data(merged_profile)
+    if not skill_groups:
+        merged_skills = report_data.get("merged_skills", {})
+        if merged_skills:
+            skill_names = [s for s, _ in sorted(merged_skills.items(),
+                                                key=lambda x: x[1], reverse=True)]
+            skill_groups = group_skills_by_keyword(skill_names)
+    report_data["skill_groups"] = skill_groups or []
     html = _render_html(report_data)
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, HTML_FILE_NAME)

@@ -237,6 +237,83 @@ def normalize_skill_names(raw_skills):
     return normalized
 
 
+_KEYWORD_CATEGORIES = [
+    ("AI / ML", ["pytorch", "tensorflow", "keras", "scikit-learn", "numpy", "pandas",
+                 "feature engineering", "time series", "lightgbm", "xgboost", "catboost",
+                 "neural network", "deep learning", "machine learning", "computer vision",
+                 "hugging face", "transformers", "fine-tuning", "lora", "peft",
+                 "model quantization", "onnx", "diffusers", "reinforcement learning",
+                 "model evaluation", "model training", "hyperparameter",
+                 "scipy", "matplotlib", "seaborn", "data visualization",
+                 "regression", "classification", "clustering", "video processing",
+                 "image processing", "opencv", "networkx", "graph analysis",
+                 "graph construction"]),
+    ("GenAI", ["prompt engineering", "langchain", "llamaindex", "rag",
+               "vector database", "embeddings", "openai api", "ai agents",
+               "function calling", "chromadb", "weaviate", "pinecone", "milvus",
+               "ollama", "vllm", "text generation", "llm", "chatbot",
+               "gemini api", "claude api"]),
+    ("Frontend", ["react", "angular", "vue", "svelte", "next.js", "nuxt",
+                  "html", "css", "sass", "tailwind", "bootstrap", "webpack",
+                  "vite", "redux", "zustand", "material ui", "chakra",
+                  "framer motion", "three.js", "d3.js", "chart.js",
+                  "web scraping"]),
+    ("Backend", ["rest api", "graphql", "express", "fastapi", "flask", "django",
+                 "spring", "node.js", "websocket", "grpc", "api integration",
+                 "authentication", "jwt", "oauth", "celery", "rabbitmq",
+                 "kafka", "microservices", "nginx", "api gateway",
+                 "pydantic", "middleware", "batch processing"]),
+    ("Databases", ["sqlite", "postgresql", "mysql", "mongodb", "redis",
+                   "sqlalchemy", "orm", "prisma", "dynamodb", "cassandra",
+                   "elasticsearch", "neo4j", "firestore", "supabase",
+                   "data modeling"]),
+    ("DevOps / Cloud", ["docker", "kubernetes", "terraform", "ansible", "jenkins",
+                        "github actions", "ci/cd", "aws", "azure", "gcp",
+                        "google cloud", "cloudformation", "helm", "prometheus",
+                        "grafana", "linux", "monitoring", "pytest"]),
+    ("Data", ["spark", "airflow", "dbt", "snowflake", "bigquery",
+              "data pipeline", "etl", "data warehouse", "hadoop",
+              "databricks", "redshift", "tableau", "power bi",
+              "data engineering", "streaming", "backtesting"]),
+    ("Mobile", ["react native", "flutter", "swift", "swiftui", "kotlin",
+                "android", "ios", "expo", "capacitor"]),
+    ("APIs", ["alpaca api", "youtube api", "stripe api", "twilio",
+              "slack api", "twitter api", "github api", "spotify api"]),
+]
+
+
+def group_skills_by_keyword(skill_names):
+    """Group skills into categories using keyword matching (no LLM needed)."""
+    if not skill_names:
+        return []
+
+    groups = {}
+    for skill in skill_names:
+        skill_lower = skill.lower()
+        matched = False
+        for cat_name, keywords in _KEYWORD_CATEGORIES:
+            for kw in keywords:
+                if len(kw) <= 3 or len(skill_lower) <= 3:
+                    hit = (kw == skill_lower)
+                else:
+                    hit = (kw in skill_lower or skill_lower in kw)
+                if hit:
+                    groups.setdefault(cat_name, []).append(skill)
+                    matched = True
+                    break
+            if matched:
+                break
+        if not matched:
+            groups.setdefault("Other", []).append(skill)
+
+    cat_order = [c[0] for c in _KEYWORD_CATEGORIES] + ["Other"]
+    result = []
+    for cat in cat_order:
+        if cat in groups:
+            result.append({"name": cat, "skills": groups[cat]})
+    return result
+
+
 GROUP_SKILLS_PROMPT = (
     "Group these technical skills into 3-5 categories for a developer profile chart.\n\n"
     "Use short domain-based category names like:\n"

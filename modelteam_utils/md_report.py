@@ -22,17 +22,37 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.patches import FancyBboxPatch
 import numpy as np
+from scipy.interpolate import make_interp_spline
 
 try:
     from wordcloud import WordCloud
 except ImportError:
     WordCloud = None
 
-from .ai_utils import group_skills_for_report
+from .ai_utils import group_skills_by_keyword, group_skills_for_report
 from .html_report import _build_report_data
 
 MD_FILE_NAME = "README.md"
 IMAGES_DIR = "images"
+
+
+def compute_skill_groups(profile_json, model_data):
+    """Group a profile's skills via the LLM (or keyword fallback), for reuse across reports.
+
+    Returns a list of ``{"name", "skills"}`` dicts.
+    """
+    with open(profile_json, "r", encoding="utf-8") as f:
+        merged_profile = json.load(f)
+    report_data = _build_report_data(merged_profile)
+    merged_skills = report_data.get("merged_skills", {})
+    if not merged_skills:
+        return None
+    skill_names = [s for s, _ in sorted(merged_skills.items(),
+                                        key=lambda x: x[1], reverse=True)]
+    if model_data:
+        print("  Grouping skills for activity chart...", flush=True)
+        return group_skills_for_report(model_data, skill_names)
+    return group_skills_by_keyword(skill_names)
 
 # ── Palette ──────────────────────────────────────────────────────────────────
 
@@ -63,6 +83,16 @@ def _save(fig, path):
     plt.close(fig)
 
 
+def _smooth(x, y, num=200):
+    """Return interpolated (x_smooth, y_smooth) for a cubic spline through (x, y)."""
+    if len(x) < 3:
+        return x, y
+    spl = make_interp_spline(x, y, k=min(3, len(x) - 1))
+    x_smooth = np.linspace(x[0], x[-1], num)
+    y_smooth = spl(x_smooth)
+    y_smooth = np.maximum(y_smooth, 0)
+    return x_smooth, y_smooth
+
 
 # ── Chart: Languages (line chart over time) ────────────────────────────────
 
@@ -87,9 +117,10 @@ def _chart_languages(lang_qtr_added, quarters, path):
 
     fig, ax = plt.subplots(figsize=(8, 4))
     for i, (lang, _) in enumerate(items):
-        values = [lang_qtr_added[lang].get(q, 0) for q in display_quarters]
-        ax.plot(x, values, '-o', label=lang, color=colors[i],
-                linewidth=2, markersize=4)
+        values = np.array([lang_qtr_added[lang].get(q, 0) for q in display_quarters])
+        xs, ys = _smooth(x, values)
+        ax.plot(xs, ys, '-', color=colors[i], linewidth=2)
+        ax.plot(x, values, 'o', label=lang, color=colors[i], markersize=4)
 
     ax.set_xlim(0, len(display_quarters) - 1)
     ax.set_xticks(x)
@@ -122,6 +153,9 @@ _AREA_COLORS = [
     "#ec4899", "#ef4444", "#0ea5e9", "#64748b", "#84cc16",
 ]
 
+# Max skills drawn in a single line chart; larger groups split across panels.
+_MAX_SKILLS_PER_CHART = 5
+
 def _chart_activity(skill_qtr_lines, sorted_skills, quarters, path, groups=None):
     display_quarters = quarters[-8:]
     if not display_quarters:
@@ -138,7 +172,7 @@ def _chart_activity(skill_qtr_lines, sorted_skills, quarters, path, groups=None)
         return False
 
     if not groups:
-        ordered = [s for s, _ in sorted_skills if s in active_skills][:8]
+        ordered = [s for s, _ in sorted_skills if s in active_skills]
         groups = [{"name": "Skills", "skills": ordered}]
 
     groups = [
@@ -149,7 +183,23 @@ def _chart_activity(skill_qtr_lines, sorted_skills, quarters, path, groups=None)
     if not groups:
         return False
 
-    n_groups = len(groups)
+    # Split any group with more than _MAX_SKILLS_PER_CHART skills into multiple
+    # line charts so a single panel never gets too crowded.
+    panels = []
+    for group in groups:
+        skills = group["skills"]
+        if len(skills) <= _MAX_SKILLS_PER_CHART:
+            panels.append({"name": group["name"], "skills": skills})
+            continue
+        n_parts = (len(skills) + _MAX_SKILLS_PER_CHART - 1) // _MAX_SKILLS_PER_CHART
+        for part in range(n_parts):
+            chunk = skills[part * _MAX_SKILLS_PER_CHART:(part + 1) * _MAX_SKILLS_PER_CHART]
+            panels.append({
+                "name": group["name"] if part == 0 else group["name"] + " [contd.]",
+                "skills": chunk,
+            })
+
+    n_groups = len(panels)
     n_qt = len(display_quarters)
     qtr_labels = [f"{q[4:]}'{q[2:4]}" for q in display_quarters]
     x = np.arange(n_qt)
@@ -163,15 +213,16 @@ def _chart_activity(skill_qtr_lines, sorted_skills, quarters, path, groups=None)
                              squeeze=False)
 
     color_idx = 0
-    for g_idx, group in enumerate(groups):
+    for g_idx, group in enumerate(panels):
         row, col = g_idx // ncols, g_idx % ncols
         ax = axes[row][col]
 
         for skill in group["skills"]:
-            values = [skill_qtr_lines.get(skill, {}).get(q, 0) for q in display_quarters]
+            values = np.array([skill_qtr_lines.get(skill, {}).get(q, 0) for q in display_quarters])
             color = _AREA_COLORS[color_idx % len(_AREA_COLORS)]
-            ax.plot(x, values, '-o', label=skill, color=color,
-                    linewidth=2, markersize=4)
+            xs, ys = _smooth(x, values)
+            ax.plot(xs, ys, '-', color=color, linewidth=2)
+            ax.plot(x, values, 'o', label=skill, color=color, markersize=4)
             color_idx += 1
 
         ax.set_title(group["name"], fontsize=12, fontweight="bold",
@@ -321,7 +372,7 @@ def _render_markdown(report_data, has):
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-def generate_md_report(profile_json, output_dir, model_data=None):
+def generate_md_report(profile_json, output_dir, model_data=None, skill_groups=None):
     """Generate a GitHub-profile-ready folder with README.md and charts.
 
     Returns the absolute path to the written README.md.
@@ -342,11 +393,14 @@ def generate_md_report(profile_json, output_dir, model_data=None):
 
     sorted_skills = sorted(merged_skills.items(), key=lambda x: x[1], reverse=True)
 
-    groups = None
-    if model_data and merged_skills:
+    groups = skill_groups
+    if groups is None and merged_skills:
         skill_names = [s for s, _ in sorted_skills]
-        print("  Grouping skills for activity chart...", flush=True)
-        groups = group_skills_for_report(model_data, skill_names)
+        if model_data:
+            print("  Grouping skills for activity chart...", flush=True)
+            groups = group_skills_for_report(model_data, skill_names)
+        else:
+            groups = group_skills_by_keyword(skill_names)
 
     has = {
         "langs":    _chart_languages(lang_qtr_added, quarters, os.path.join(images_dir, "languages.png")),
