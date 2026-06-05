@@ -18,12 +18,11 @@ from modelteam_utils.html_report import generate_html_report
 from modelteam_utils.md_report import compute_skill_groups, generate_md_report
 from modelteam_utils.qt_style import APP_STYLESHEET
 from modelteam_utils.skill_filter import CACHE_FILENAME, filter_profile_skills
-from modelteam_utils.utils import filter_skills, get_extension_to_language_map, load_skill_config, trunc_string
+from modelteam_utils.utils import filter_skills, get_extension_to_language_map, trunc_string
 
-display_names = {}
 
 def get_skill_display_name(skill):
-    return display_names.get(skill, skill.title())
+    return skill
 
 
 class App(QWidget):
@@ -444,11 +443,6 @@ if __name__ == "__main__":
     config_file = args.config
     config = configparser.ConfigParser()
     config.read(config_file)
-    skill_list_path = config["modelteam.ai"].get("skill_list", "")
-    if skill_list_path and os.path.exists(skill_list_path):
-        display_names = load_skill_config(skill_list_path, only_keys=False)
-    else:
-        display_names = {}
     with open(profile_json, "r") as f:
         merged_profile = json.load(f)
     model_data = init_ollama(config) if check_ollama_ready(config) else None

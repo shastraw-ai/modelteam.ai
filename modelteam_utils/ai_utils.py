@@ -6,7 +6,8 @@ from .constants import OLLAMA_DEFAULT_ENDPOINT, OLLAMA_DEFAULT_MODEL, SKILL_PRED
 
 SYSTEM_PROMPT = (
     "You are a code skill extractor. Given code snippets with file metadata, identify the "
-    "specific technical skills demonstrated.\n\n"
+    "specific technical skills demonstrated and estimate what percentage of the code is "
+    "dedicated to each skill.\n\n"
     "RULES:\n"
     "1. Return specific, named technologies: frameworks, libraries, platforms, tools, "
     "protocols, concrete engineering disciplines.\n"
@@ -16,7 +17,8 @@ SYSTEM_PROMPT = (
     "\"WebSocket\", \"Kubernetes\", \"Terraform\", \"Redis\", \"Celery\", \"OAuth\"\n"
     "   BAD: \"Error Handling\", \"Data Processing\", \"Web Development\", \"API Design\", "
     "\"Object-Oriented Programming\", \"Code Quality\", \"Asynchronous Programming\", "
-    "\"String Manipulation\", \"Logging\"\n\n"
+    "\"String Manipulation\", \"Logging\", \"Abstract Base Classes\", \"Concurrency\", "
+    "\"Caching\", \"File I/O\", \"Async/Await\"\n\n"
     "2. Map imports and usage patterns to the framework/library/technique name:\n"
     "   - \"from transformers import ...\" -> \"Hugging Face Transformers\"\n"
     "   - \"from peft import LoraConfig\" -> \"LoRA\", \"PEFT\"\n"
@@ -37,11 +39,21 @@ SYSTEM_PROMPT = (
     "   - Model quantization (GPTQ, AWQ, bitsandbytes) -> \"Model Quantization\"\n"
     "   - Model serving (vLLM, TGI, Triton) -> name the specific server\n"
     "   - Agents, planning, multi-step reasoning -> \"AI Agents\"\n\n"
-    "4. Do NOT return the programming language itself as a skill.\n"
-    "5. Use standard capitalization (e.g., \"FastAPI\" not \"fastapi\", \"NumPy\" not \"numpy\", "
+    "4. Assign each skill an integer weight (percentage) representing what fraction "
+    "of the code is dedicated to that skill. Weights MUST sum to 100.\n"
+    "   - The PRIMARY framework/library the code is built around gets the largest weight.\n"
+    "   - Libraries only used via import or a single call get 5-10%.\n"
+    "   - Techniques demonstrated throughout the code get proportional weight.\n"
+    "   EXAMPLES:\n"
+    "   - React component using fetch for one API call: React 70%, fetch 15%, JSON 15%\n"
+    "   - pytest fixtures for a Flask app: pytest 50%, Flask 30%, Fixtures 20%\n"
+    "   - Express route with Prisma + Zod + JWT: Express 25%, Prisma 25%, Zod 15%, "
+    "JWT 15%, Authentication 10%, bcrypt 10%\n\n"
+    "5. Do NOT return the programming language itself as a skill.\n"
+    "6. Use standard capitalization (e.g., \"FastAPI\" not \"fastapi\", \"NumPy\" not \"numpy\", "
     "\"PyTorch\" not \"pytorch\", \"LangChain\" not \"langchain\").\n"
-    "6. Return at most {limit} skills.\n"
-    "7. Return ONLY JSON: {{\"skills\": [\"Skill1\", \"Skill2\"]}}"
+    "7. Return at most {limit} skills.\n"
+    "8. Return ONLY JSON: {{\"skills\": [{{\"name\": \"Skill\", \"weight\": 60}}, ...]}}"
 )
 
 FEW_SHOT_EXAMPLES = [
@@ -64,7 +76,7 @@ FEW_SHOT_EXAMPLES = [
             "model.push_to_hub(\"my-org/fine-tuned-model\")\n"
             "```"
         ),
-        "assistant": '{"skills": ["Hugging Face Transformers", "LoRA", "PEFT", "QLoRA", "PyTorch", "Fine-Tuning", "Hugging Face Hub"]}'
+        "assistant": '{"skills": [{"name": "Hugging Face Transformers", "weight": 25}, {"name": "LoRA", "weight": 20}, {"name": "PEFT", "weight": 15}, {"name": "QLoRA", "weight": 15}, {"name": "PyTorch", "weight": 10}, {"name": "Fine-Tuning", "weight": 10}, {"name": "Hugging Face Hub", "weight": 5}]}'
     },
     {
         "user": (
@@ -79,7 +91,7 @@ FEW_SHOT_EXAMPLES = [
             "response = chain.invoke({\"query\": user_question})\n"
             "```"
         ),
-        "assistant": '{"skills": ["LangChain", "ChromaDB", "OpenAI API", "RAG", "Embeddings", "Vector Database"]}'
+        "assistant": '{"skills": [{"name": "LangChain", "weight": 30}, {"name": "RAG", "weight": 25}, {"name": "ChromaDB", "weight": 15}, {"name": "OpenAI API", "weight": 15}, {"name": "Embeddings", "weight": 10}, {"name": "Vector Database", "weight": 5}]}'
     },
     {
         "user": (
@@ -96,7 +108,7 @@ FEW_SHOT_EXAMPLES = [
             "});\n"
             "```"
         ),
-        "assistant": '{"skills": ["Express", "Prisma", "Zod", "JWT", "Authentication", "bcrypt"]}'
+        "assistant": '{"skills": [{"name": "Express", "weight": 25}, {"name": "Prisma", "weight": 25}, {"name": "Zod", "weight": 15}, {"name": "JWT", "weight": 15}, {"name": "Authentication", "weight": 10}, {"name": "bcrypt", "weight": 10}]}'
     },
 ]
 
@@ -176,7 +188,7 @@ def extract_skills_from_snippet(model_data, code_snippet, file_name="", lang="",
             raw_skills = parsed
         else:
             return []
-        return normalize_skill_names(raw_skills)[:SKILL_PREDICTION_LIMIT]
+        return normalize_weighted_skills(raw_skills)[:SKILL_PREDICTION_LIMIT]
     except Exception as e:
         print(f"Ollama inference error: {e}", flush=True)
         return []
@@ -235,6 +247,69 @@ def normalize_skill_names(raw_skills):
             normalized.append(s)
             seen.add(key)
     return normalized
+
+
+def normalize_weighted_skills(raw_skills):
+    """Normalize LLM output into a list of {name, weight} dicts summing to 100.
+
+    Handles both the new weighted format and falls back gracefully if the LLM
+    returns the old flat-list format.
+    """
+    if not raw_skills or not isinstance(raw_skills, list):
+        return []
+
+    # Detect format: weighted dicts vs flat strings
+    if raw_skills and isinstance(raw_skills[0], str):
+        names = normalize_skill_names(raw_skills)
+        if not names:
+            return []
+        w = 100 // len(names)
+        remainder = 100 - w * len(names)
+        return [{"name": n, "weight": w + (1 if i < remainder else 0)}
+                for i, n in enumerate(names)]
+
+    # Weighted format: validate and deduplicate
+    merged = {}
+    order = []
+    for entry in raw_skills:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name", "")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        name = name.strip()
+        weight = entry.get("weight", 0)
+        if not isinstance(weight, (int, float)):
+            weight = 0
+        weight = max(0, int(weight))
+        key = name.lower()
+        if key in merged:
+            merged[key]["weight"] += weight
+        else:
+            merged[key] = {"name": name, "weight": weight}
+            order.append(key)
+
+    if not merged:
+        return []
+
+    result = [merged[k] for k in order]
+
+    # Normalize weights to sum to 100
+    total = sum(e["weight"] for e in result)
+    if total == 0:
+        w = 100 // len(result)
+        remainder = 100 - w * len(result)
+        for i, e in enumerate(result):
+            e["weight"] = w + (1 if i < remainder else 0)
+    elif total != 100:
+        for e in result:
+            e["weight"] = int(e["weight"] * 100 / total)
+        # Distribute rounding remainder to the largest skill
+        remainder = 100 - sum(e["weight"] for e in result)
+        if remainder != 0:
+            result[0]["weight"] += remainder
+
+    return result
 
 
 _KEYWORD_CATEGORIES = [

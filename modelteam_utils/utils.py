@@ -303,30 +303,6 @@ def break_code_snippets_to_chunks(file_name, code, chunk_char_limit, sep=None):
         return [code]
 
 
-def load_lib_config(path):
-    files = os.listdir(path)
-    prev_libs = {}
-    for file in files:
-        if not file.endswith(".txt"):
-            continue
-        with open(os.path.join(path, file), "r") as f:
-            lines = f.readlines()
-            language = file.split(".")[0]
-            for line in lines:
-                if not line.strip():
-                    continue
-                if language not in prev_libs:
-                    prev_libs[language] = {}
-                    prev_libs[language]["next_id"] = 1
-                    prev_libs[language]["libs"] = {}
-                parts = line.split("\t")
-                id = int(parts[1].strip())
-                prev_libs[language]["libs"][parts[0].strip()] = id
-                if id >= prev_libs[language]["next_id"]:
-                    prev_libs[language]["next_id"] = id + 1
-    return prev_libs
-
-
 def load_file_to_set(file_name):
     """
     Load the file to a set. Can handle both compressed and uncompressed files
@@ -339,23 +315,6 @@ def load_file_to_set(file_name):
     else:
         with open(file_name, "r") as f:
             return set(f.read().splitlines())
-
-
-def load_skill_config(file_name, only_keys=True, return_set=True):
-    skill_config = {}
-    skill_list = []
-    with open(file_name, "r") as f:
-        for line in f:
-            parts = line.strip().split("\t")
-            if only_keys:
-                skill_list.append(parts[0])
-            else:
-                skill_config[parts[0]] = parts[1]
-    if only_keys:
-        if return_set:
-            return set(skill_list)
-        return skill_list
-    return skill_config
 
 
 def load_file_to_list(file_name):

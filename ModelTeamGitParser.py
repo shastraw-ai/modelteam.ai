@@ -222,19 +222,6 @@ class ModelTeamGitParser:
             self.process_commit(commit, user_commit_stats, labels, repo_path, user)
 
     @staticmethod
-    def aggregate_library_helper(import_type, commits, file_extension, libraries, yyyy_mm):
-        # TODO change this to bucketize the libs
-        if file_extension not in commits[LANGS]:
-            commits[LANGS][file_extension] = {}
-        if LIBS not in commits[LANGS][file_extension]:
-            commits[LANGS][file_extension][LIBS] = {}
-        if import_type not in commits[LANGS][file_extension][LIBS]:
-            commits[LANGS][file_extension][LIBS][import_type] = {}
-        if yyyy_mm not in commits[LANGS][file_extension][LIBS][import_type]:
-            commits[LANGS][file_extension][LIBS][import_type][yyyy_mm] = []
-        commits[LANGS][file_extension][LIBS][import_type][yyyy_mm].append(libraries)
-
-    @staticmethod
     def get_newly_added_snippets(git_diff, repo_stats):
         """
         Given a git diff, return the newly added snippets. These snippets should be continuous chunks of code that got added
@@ -567,17 +554,21 @@ class ModelTeamGitParser:
 
     @staticmethod
     def accumulate_score(user_profile, lang, yyyy_mm, skills, code_len, tag):
-        for s in skills:
+        for skill_entry in skills:
+            s = skill_entry["name"]
+            weighted_loc = int(code_len * skill_entry["weight"] / 100)
+            if weighted_loc == 0:
+                continue
             if s not in user_profile[SKILLS]:
                 user_profile[SKILLS][s] = 0
-            user_profile[SKILLS][s] += code_len
+            user_profile[SKILLS][s] += weighted_loc
             if tag not in user_profile[LANGS][lang][TIME_SERIES][yyyy_mm]:
                 user_profile[LANGS][lang][TIME_SERIES][yyyy_mm][tag] = {}
             if s not in user_profile[LANGS][lang][TIME_SERIES][yyyy_mm][tag]:
                 user_profile[LANGS][lang][TIME_SERIES][yyyy_mm][tag][s] = [0, 0]
-            skill_entry = user_profile[LANGS][lang][TIME_SERIES][yyyy_mm][tag][s]
-            skill_entry[0] += 1
-            skill_entry[1] += code_len
+            ts_entry = user_profile[LANGS][lang][TIME_SERIES][yyyy_mm][tag][s]
+            ts_entry[0] += 1
+            ts_entry[1] += weighted_loc
 
 
 def gen_user_name(users, team_name, max_len=255):
