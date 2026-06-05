@@ -26,6 +26,7 @@ class GitHelperTool(QDialog):
         self.current_user = self.get_git_user_email()
         self.input_path = os.path.expanduser("~")
         self.num_years = 5
+        self.prev_selected_repos = self._load_previous_selections()
 
         self.layout = QVBoxLayout()
         self.layout.setContentsMargins(28, 24, 28, 24)
@@ -160,6 +161,13 @@ class GitHelperTool(QDialog):
 
         self.layout.addWidget(self.output_terminal)
 
+    def _load_previous_selections(self):
+        repo_file = os.path.join(os.getcwd(), "repo_list_autogen.txt")
+        if not os.path.exists(repo_file):
+            return set()
+        with open(repo_file) as f:
+            return {line.strip() for line in f if line.strip() and os.path.isdir(line.strip())}
+
     def browse_directory(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Directory", directory=self.input_path)
         if directory:
@@ -181,8 +189,11 @@ class GitHelperTool(QDialog):
                 self.git_repos.append(repo_path)
                 item = QListWidgetItem(repo_path)  # Create a list item for the repo
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)  # Make it checkable
-                item.setCheckState(Qt.Checked)  # Default to checked
-                self.repo_list.addItem(item)  # Add item to the list
+                if self.prev_selected_repos:
+                    item.setCheckState(Qt.Checked if repo_path in self.prev_selected_repos else Qt.Unchecked)
+                else:
+                    item.setCheckState(Qt.Checked)
+                self.repo_list.addItem(item)
                 dirs[:] = []  # Don't recurse into subdirectories
             else:
                 dirs[:] = [d for d in dirs if not d.startswith('.')]
