@@ -418,9 +418,10 @@ class ModelTeamGitParser:
                                 user_profiles[user_stats[USER]] = user_stats[STATS]
                 if self.model_data is None:
                     if not check_ollama_ready(self.config):
-                        print("ERROR: Ollama is not running or model not available.", flush=True)
-                        print("Please install Ollama (https://ollama.com) and pull the configured model.", flush=True)
-                        return
+                        model = self.config.get("ollama", "model", fallback="")
+                        print(f"ERROR: Ollama is not running or model '{model}' not available.", flush=True)
+                        print("Please run 'python setup.py' to install and pull the configured model.", flush=True)
+                        sys.exit(1)
                     self.model_data = init_ollama(self.config)
                 model_data = self.model_data
                 model_label = f"Skill Prediction@{repo_name}"
