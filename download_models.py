@@ -1,39 +1,34 @@
 import argparse
-import gc
+import subprocess
+import sys
 from configparser import ConfigParser
 
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from modelteam_utils.ai_utils import check_ollama_ready, init_ollama, extract_skills_from_snippet
+from modelteam_utils.constants import OLLAMA_DEFAULT_MODEL
 
-from modelteam_utils.constants import MODEL_TYPES, C2S, LIFE_OF_PY, I2S
-from modelteam_utils.ai_utils import eval_llm_batch_with_scores, get_model_list, init_model
-
-arg_parser = argparse.ArgumentParser(description="Download models")
+arg_parser = argparse.ArgumentParser(description="Setup Ollama models")
 arg_parser.add_argument("--config", type=str, help="config file")
 args = arg_parser.parse_args()
-model_team_config = ConfigParser()
-model_team_config.read(args.config)
-device = "cpu"  # for GPU usage or "cpu" for CPU usage
-code = """
-def hello_world():
-    print("Hello World! Thanks for using modelteam!")
-"""
-print("!!!IMPORTANT!!! Please turn off sleep mode so that the job is not interrupted.", flush=True)
-print("Downloading Base Model https://huggingface.co/Salesforce/codet5p-770m", flush=True)
-checkpoint = "Salesforce/codet5p-770m"
-tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-model = AutoModelForSeq2SeqLM.from_pretrained(checkpoint).to(device)
+config = ConfigParser()
+config.read(args.config)
+model = config.get("ollama", "model", fallback=OLLAMA_DEFAULT_MODEL)
 
-inputs = tokenizer.encode(code, return_tensors="pt").to(device)
-outputs = model.generate(inputs, max_length=10)
+print("Checking Ollama installation...", flush=True)
+try:
+    subprocess.run(["ollama", "pull", model], check=True)
+except FileNotFoundError:
+    print("ERROR: Ollama is not installed. Please install from https://ollama.com")
+    sys.exit(1)
+except subprocess.CalledProcessError as e:
+    print(f"ERROR: Failed to pull model '{model}': {e}")
+    sys.exit(1)
 
-for model_type in MODEL_TYPES:
-    models = get_model_list(model_team_config, model_type)
-    for model_path in models:
-        print(f"Downloading https://huggingface.co/{model_path}", flush=True)
-        model_data = init_model(model_path, model_type, model_team_config, device)
-        if model_type == C2S or model_type == LIFE_OF_PY or model_type == I2S:
-            skill_list, score_list, sm_score_list = eval_llm_batch_with_scores(model_data['tokenizer'], device,
-                                                                               model_data['model'], [code],
-                                                                               model_data['new_tokens'], 3)
-        del model_data
-        gc.collect()
+if check_ollama_ready(config):
+    print(f"Ollama model '{model}' is ready.", flush=True)
+    model_data = init_ollama(config)
+    test_code = 'def hello_world():\n    print("Hello World!")\n'
+    skills = extract_skills_from_snippet(model_data, test_code)
+    print(f"Test inference successful. Detected skills: {skills}")
+else:
+    print(f"ERROR: Ollama is running but model '{model}' not available. Try: ollama pull {model}")
+    sys.exit(1)

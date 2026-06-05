@@ -4,130 +4,160 @@ import sys
 from datetime import datetime, timedelta
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap, QPalette, QColor
-from PyQt5.QtWidgets import QApplication, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog, \
-    QListWidget, QLabel, QComboBox, QTextEdit, QListWidgetItem, QSpinBox, QDialog, QCheckBox
+from PyQt5.QtGui import QPixmap
+from PyQt5.QtWidgets import (QApplication, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog,
+    QListWidget, QLabel, QComboBox, QTextEdit, QListWidgetItem, QSpinBox, QDialog, QCheckBox,
+    QLineEdit, QMessageBox)
 
 from edit_skills import run_edit_and_sign
+from modelteam_utils.qt_style import APP_STYLESHEET
 from setup_utils import run_model_team_git_parser, get_profile_path_file_name
-
-button_style = """
-    QPushButton {
-        background-color: #0078D4;  /* Nice blue shade */
-        color: white;
-        font-size: 14px;
-        font-weight: bold;
-        border-radius: 6px;
-        padding: 8px 16px;
-        border: 2px solid #005A9E;
-    }
-    QPushButton:hover {
-        background-color: #005A9E;
-    }
-    QPushButton:pressed {
-        background-color: #004578;
-    }
-    QPushButton:disabled {
-        background-color: #C8C8C8;
-        color: #6A6A6A;
-        border: 2px solid #979797;
-    }
-"""
 
 
 class GitHelperTool(QDialog):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('modelteam Git Stats Helper')
-        self.setStyleSheet("background-color: #333333; color: white;")
-        self.setGeometry(100, 100, 800, 800)
+        self.setWindowTitle('modelteam · profile builder')
+        self.setGeometry(100, 100, 880, 860)
 
         # Initialize variables
         self.git_repos = []
         self.selected_repos = []
         self.current_user = self.get_git_user_email()
-        # default path, user's home directory
         self.input_path = os.path.expanduser("~")
         self.num_years = 5
 
-        # Layouts
         self.layout = QVBoxLayout()
+        self.layout.setContentsMargins(28, 24, 28, 24)
+        self.layout.setSpacing(14)
         self.setLayout(self.layout)
 
-        # Widgets
-        self.path_label = QLabel(
-            "Parent directory to scan for Git repos. You can pick and choose which repos to include in your profile.\n(Choose home directory if you want to get all git repos)", self)
-        self.path_input = QLabel(self)
-
-        self.browse_button = QPushButton('1. Browse', self)
-        self.browse_button.clicked.connect(self.browse_directory)
-        self.browse_button.setMaximumSize(250, 50)
-        # set button color to blue
-        self.browse_button.setStyleSheet(button_style)
-        self.repo_list_label = QLabel("Pick repos to add to your profile", self)
-        self.repo_list = QListWidget(self)
-
-        self.scan_authors_button = QPushButton('2. Scan Git Email IDs', self)
-        self.scan_authors_button.clicked.connect(self.scan_for_authors)
-        self.scan_authors_button.setStyleSheet(button_style)
-        self.scan_authors_button.setMaximumSize(250, 50)
-        self.scan_authors_button.setEnabled(False)
-
-        self.author_label = QLabel("Select an Author", self)
-        self.author_combo = QComboBox(self)
-        self.author_note = QLabel("If you have multiple git email IDs, run multiple times to build profile one by one", self)
-
-        self.num_years_label = QLabel("Number of years", self)
-        self.num_years_input = QSpinBox(self)
-        self.num_years_input.setRange(1, 100)  # Set min/max range
-        self.num_years_input.setValue(self.num_years)
-        self.num_years_input.valueChanged.connect(lambda x: setattr(self, 'num_years', x))
-
-        self.run_button = QPushButton('3. Generate User Git Stats', self)
-
-        self.force_rerun = QCheckBox("Cleanup and Force Re-run\n(Needs confirmation in command line)", self)
-        self.force_rerun.setChecked(False)
-
-        self.run_button.setStyleSheet(button_style)
-        self.run_button.clicked.connect(self.run_git_command)
-        self.run_button.setMaximumSize(250, 50)
-        self.run_button.setEnabled(False)
-
-        self.output_terminal = QTextEdit(self)
-        self.output_terminal.setReadOnly(True)
-        # Add logo image (PNG)
+        # Logo header
         pixmap = QPixmap(os.path.join("images", "modelteam_logo.png"))
+        if not pixmap.isNull():
+            pixmap = pixmap.scaledToHeight(48, Qt.SmoothTransformation)
         logo_label = QLabel()
         logo_label.setPixmap(pixmap)
 
-        # Layout arrangement
-        # path and browse button in same row
-        self.layout.addWidget(logo_label)
-        self.input_layout = QVBoxLayout()
-        self.input_layout.addWidget(self.path_label)
-        self.path_layout = QHBoxLayout()
-        self.path_layout.addWidget(self.browse_button)
-        self.path_layout.addWidget(self.path_input)
-        self.input_layout.addLayout(self.path_layout)
-        self.layout.addLayout(self.input_layout)
+        title_label = QLabel("Profile Builder")
+        title_label.setProperty("heading", True)
+        title_label.setStyleSheet(
+            "font-size: 22px; font-weight: 600; color: #e6edf3; padding-left: 12px;"
+        )
+        subtitle_label = QLabel("Extract skills from your local Git history")
+        subtitle_label.setProperty("hint", True)
+        subtitle_label.setStyleSheet("color: #8b949e; font-size: 13px; padding-left: 12px;")
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+        title_box.addWidget(title_label)
+        title_box.addWidget(subtitle_label)
+
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(logo_label)
+        header_layout.addLayout(title_box, 1)
+        self.layout.addLayout(header_layout)
+
+        # Step 1 — Directory
+        self.path_label = QLabel(
+            "Step 1 — Parent directory to scan for Git repos\n"
+            "Pick the folder that contains your repos (use home to scan everything)."
+        )
+        self.path_label.setProperty("heading", True)
+        self.path_input = QLabel(self)
+        self.path_input.setProperty("mono", True)
+
+        self.browse_button = QPushButton('Browse', self)
+        self.browse_button.clicked.connect(self.browse_directory)
+        self.browse_button.setMaximumWidth(140)
+
+        # Step 2 — Repos
+        self.repo_list_label = QLabel("Step 2 — Pick the repos to include")
+        self.repo_list_label.setProperty("heading", True)
+        self.repo_list = QListWidget(self)
+        self.repo_list.setMinimumHeight(180)
+
+        self.scan_authors_button = QPushButton('Scan Git Email IDs', self)
+        self.scan_authors_button.clicked.connect(self.scan_for_authors)
+        self.scan_authors_button.setMaximumWidth(220)
+        self.scan_authors_button.setEnabled(False)
+
+        # Step 3 — Author / years
+        self.author_label = QLabel("Step 3 — Select your author email(s)")
+        self.author_label.setProperty("heading", True)
+        self.author_list = QListWidget(self)
+        self.author_list.setMinimumHeight(100)
+        self.author_list.setMaximumHeight(140)
+        self.author_list.itemChanged.connect(self.on_author_selection_changed)
+        self.author_note = QLabel(
+            "Select multiple emails if you use different git IDs across repos."
+        )
+        self.author_note.setProperty("hint", True)
+        self.author_note.setWordWrap(True)
+
+        self.display_name_label = QLabel("Display name (required when selecting multiple emails)")
+        self.display_name_label.setProperty("heading", True)
+        self.display_name_input = QLineEdit(self)
+        self.display_name_input.setPlaceholderText("e.g. John Doe")
+        self.display_name_label.setVisible(False)
+        self.display_name_input.setVisible(False)
+
+        self.num_years_label = QLabel("History window (years)")
+        self.num_years_input = QSpinBox(self)
+        self.num_years_input.setRange(1, 100)
+        self.num_years_input.setValue(self.num_years)
+        self.num_years_input.setMaximumWidth(120)
+        self.num_years_input.valueChanged.connect(lambda x: setattr(self, 'num_years', x))
+
+        # Step 4 — Run
+        self.run_button = QPushButton('Generate User Git Stats', self)
+        self.run_button.setMaximumWidth(260)
+        self.run_button.clicked.connect(self.run_git_command)
+        self.run_button.setEnabled(False)
+
+        self.force_rerun = QCheckBox("Cleanup and force re-run  (needs CLI confirmation)", self)
+        self.force_rerun.setChecked(False)
+
+        self.run_label = QLabel("Continues in the terminal once started.")
+        self.run_label.setProperty("hint", True)
+
+        self.output_terminal = QTextEdit(self)
+        self.output_terminal.setReadOnly(True)
+        self.output_terminal.setMinimumHeight(160)
+
+        # Layout assembly
+        self.layout.addSpacing(6)
+        self.layout.addWidget(self.path_label)
+        path_row = QHBoxLayout()
+        path_row.addWidget(self.browse_button)
+        path_row.addWidget(self.path_input, 1)
+        self.layout.addLayout(path_row)
+
+        self.layout.addSpacing(4)
         self.layout.addWidget(self.repo_list_label)
         self.layout.addWidget(self.repo_list)
         self.layout.addWidget(self.scan_authors_button)
-        self.author_layout = QHBoxLayout()
-        self.author_layout.addWidget(self.author_label, 2)
-        self.author_layout.addWidget(self.author_combo, 8)
-        self.layout.addLayout(self.author_layout)
+
+        self.layout.addSpacing(4)
+        self.layout.addWidget(self.author_label)
+        self.layout.addWidget(self.author_list)
         self.layout.addWidget(self.author_note)
-        self.num_years_layout = QHBoxLayout()
-        self.num_years_layout.addWidget(self.num_years_label, 2)
-        self.num_years_layout.addWidget(self.num_years_input, 8)
-        self.layout.addLayout(self.num_years_layout)
-        self.run_layout = QHBoxLayout()
-        self.run_layout.addWidget(self.run_button)
-        self.run_label = QLabel("<- This will continue in command line...", self)
-        self.run_layout.addWidget(self.run_label)
-        self.run_layout.addWidget(self.force_rerun)
-        self.layout.addLayout(self.run_layout)
+        self.layout.addWidget(self.display_name_label)
+        self.layout.addWidget(self.display_name_input)
+
+        years_row = QHBoxLayout()
+        years_row.addWidget(self.num_years_label)
+        years_row.addWidget(self.num_years_input)
+        years_row.addStretch(1)
+        self.layout.addLayout(years_row)
+
+        self.layout.addSpacing(4)
+        run_row = QHBoxLayout()
+        run_row.addWidget(self.run_button)
+        run_row.addWidget(self.run_label, 1)
+        run_row.addWidget(self.force_rerun)
+        self.layout.addLayout(run_row)
+
         self.layout.addWidget(self.output_terminal)
 
     def browse_directory(self):
@@ -141,7 +171,7 @@ class GitHelperTool(QDialog):
         """Find all Git repositories in the provided path."""
         self.git_repos = []
         self.selected_repos = []
-        self.author_combo.clear()
+        self.author_list.clear()
         self.repo_list.clear()
 
         for root, dirs, files in os.walk(self.input_path):
@@ -171,8 +201,15 @@ class GitHelperTool(QDialog):
 
         authors = self.find_authors()
 
-        self.author_combo.clear()
-        self.author_combo.addItems(authors[:20])  # Display only the first 10 authors
+        self.author_list.blockSignals(True)
+        self.author_list.clear()
+        for author in authors[:20]:
+            item = QListWidgetItem(author)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if author == self.current_user else Qt.Unchecked)
+            self.author_list.addItem(item)
+        self.author_list.blockSignals(False)
+        self.on_author_selection_changed()
         self.run_button.setEnabled(True)
 
     def get_selected_repos(self):
@@ -221,43 +258,73 @@ class GitHelperTool(QDialog):
         except subprocess.CalledProcessError:
             return ""
 
-    def run_git_command(self):
-        """Run the Git command using the selected repos and author."""
-        selected_author = self.author_combo.currentText()
-        selected_repos = self.get_selected_repos()
+    def on_author_selection_changed(self):
+        checked = self._get_checked_authors()
+        show_name = len(checked) > 1
+        self.display_name_label.setVisible(show_name)
+        self.display_name_input.setVisible(show_name)
+        if show_name and not self.display_name_input.text():
+            local = checked[0].split("@")[0] if checked else ""
+            self.display_name_input.setText(local)
 
-        if not selected_repos or not selected_author:
+    def _get_checked_authors(self):
+        checked = []
+        for i in range(self.author_list.count()):
+            item = self.author_list.item(i)
+            if item.checkState() == Qt.Checked:
+                checked.append(item.text())
+        return checked
+
+    def run_git_command(self):
+        selected_repos = self.get_selected_repos()
+        checked_authors = self._get_checked_authors()
+
+        if not selected_repos or not checked_authors:
             self.output_terminal.append("Please select at least one repository and an author.")
+            return
+        if len(checked_authors) > 1 and not self.display_name_input.text().strip():
+            QMessageBox.warning(self, "Display name required",
+                                "Please enter a display name when selecting multiple emails.")
             return
         self.accept()
 
     def get_selected_data(self):
-        selected_author = self.author_combo.currentText()
-        return self.selected_repos, selected_author, self.num_years, self.force_rerun.isChecked()
+        checked_authors = self._get_checked_authors()
+        display_name = self.display_name_input.text().strip() if len(checked_authors) > 1 else None
+        emails_csv = ",".join(checked_authors)
+        return self.selected_repos, emails_csv, self.num_years, self.force_rerun.isChecked(), display_name
 
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    app.setStyleSheet("QListWidget { font-size: 12px; border: 1px solid white; } "
-                      "QLabel { font-size: 12px; font-weight: bold; } "
-                      "QTextEdit { font-size: 12px; border: 1px solid white; } "
-                      "QSpinBox { font-size: 14px; border: 1px solid white; } "
-                      "QComboBox { font-size: 14px; border: 1px solid white; }")
+    app.setStyleSheet(APP_STYLESHEET)
     window = GitHelperTool()
-    if window.exec_() == QDialog.Accepted:
-        selected_repos, selected_author, num_years, force_rerun = window.get_selected_data()
-        tmp_repo_file_name = os.path.join(os.getcwd(), "repo_list_autogen.txt")
-        with open(tmp_repo_file_name, "w") as f:
-            for repo in selected_repos:
-                f.write(repo + "\n")
-        profile_path_file = get_profile_path_file_name(selected_author)
-        if os.path.exists(profile_path_file):
-            os.remove(profile_path_file)
-        output_path = run_model_team_git_parser(tmp_repo_file_name, selected_author, int(num_years), False, None,
-                                                force_rerun)
-        with open(profile_path_file, "w") as f:
-            f.write(output_path)
-        if output_path:
-            run_edit_and_sign(output_path, selected_author, False, False)
-    else:
+    accepted = window.exec_() == QDialog.Accepted
+    if accepted:
+        selected_repos, emails_csv, num_years, force_rerun, display_name = window.get_selected_data()
+
+    # Tear down Qt so the child edit_and_sign process can own the macOS window server
+    window.close()
+    window.deleteLater()
+    app.processEvents()
+    app.quit()
+    del window, app
+
+    if not accepted:
         print("Dialog closed... error")
+        sys.exit(1)
+
+    tmp_repo_file_name = os.path.join(os.getcwd(), "repo_list_autogen.txt")
+    with open(tmp_repo_file_name, "w") as f:
+        for repo in selected_repos:
+            f.write(repo + "\n")
+    profile_id = display_name if display_name else emails_csv
+    profile_path_file = get_profile_path_file_name(profile_id)
+    if os.path.exists(profile_path_file):
+        os.remove(profile_path_file)
+    output_path = run_model_team_git_parser(tmp_repo_file_name, emails_csv, int(num_years), False, None,
+                                            force_rerun, display_name=display_name)
+    with open(profile_path_file, "w") as f:
+        f.write(output_path)
+    if output_path:
+        run_edit_and_sign(output_path, False, False)

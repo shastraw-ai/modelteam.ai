@@ -2,8 +2,11 @@
 FROM python:3.12-slim
 
 RUN apt-get update && \
-    apt-get install -y git cron && \
+    apt-get install -y git cron curl && \
     apt-get clean
+
+# Install Ollama
+RUN curl -fsSL https://ollama.com/install.sh | sh
 
 RUN useradd -ms /bin/bash modelteam
 
@@ -28,5 +31,4 @@ RUN git config --global safe.directory '*'
 
 VOLUME ["/home/modelteam/repos"]
 
-CMD ["sh", "-c", "cron && tail -f /var/log/cron.log"]
-
+CMD ["sh", "-c", "ollama serve & sleep 5 && cron && tail -f /var/log/cron.log"]

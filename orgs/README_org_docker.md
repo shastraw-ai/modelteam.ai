@@ -9,7 +9,7 @@
 
 - 8–16 GB RAM
 - 2–4 CPU cores
-- 40 GB Disk Space
+- 20 GB Disk Space
 - Debian/Ubuntu recommended
 
 ## Steps

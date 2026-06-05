@@ -42,44 +42,32 @@ COMMIT_HASH = 'commit_hash'
 TEAM = 'team'
 LANGUAGE = 'language'
 LABEL = 'label'
-LIFE_OF_PY = 'life_of_py'
 NR_SKILLS = 'nr_skills'
-LIFE_OF_PY_BUCKET_SIZE = 20
-LIFE_OF_PY_BUCKETS = [f"{LIFE_OF_PY}_{i}" for i in range(0, 100, LIFE_OF_PY_BUCKET_SIZE)]
 MT_PROFILE_JSON = "mt_stats.json"
 PDF_STATS_JSON = "tmp_stats.txt"
 SS_LC = "ss_lc"
-
-MAX_SCORE = 'max_score'
-MIN_SCORE = 'min_score'
-SUM_SCORE = 'sum_score'
-COUNT_SCORE = 'count_score'
 
 SKILLS = 'skills'
 SCORES = 'scores'
 MIN_LINES_ADDED = 10
 SIGNIFICANT_CONTRIBUTION_CHAR_LIMIT = 1500
 MIN_CHUNK_CHAR_LIMIT = 100
-# TODO: Change this dynamically based on the language
 SIGNIFICANT_CONTRIBUTION_LINE_LIMIT = 20
 TOO_BIG_TO_ANALYZE_LIMIT = 10000
 REFORMAT_CHAR_LIMIT = 50
 MAX_USERS = 1001
 MAX_DIFF_SIZE = 5000
 GIT_DIFF_BATCH_SIZE = 100
-T5_CHUNK_CHAR_LIMIT = 1500
-# This can be changed in the future. Qwen supports 32K tokens, but it takes a lot of time to train
-QWEN_CHUNK_CHAR_LIMIT = 1500
+CHUNK_CHAR_LIMIT = 30000
 
-SKILL_PREDICTION_LIMIT = 10
-LIFE_OF_PY_PREDICTION_LIMIT = 3
+SKILL_PREDICTION_LIMIT = 15
 
-I2S = 'i2s'
 C2S = 'c2s'
-MLC = 'mlc'
-MODEL_TYPES = [C2S, LIFE_OF_PY]
+MODEL_TYPES = [C2S]
 RELEVANT = "Relevant"
 NOT_RELEVANT = "Not Relevant"
-TOP_SECRET = "Top Secret"
-MT_START = "<|modelteam|>"
-MT_END = "<|e_modelteam|>"
+
+GIT_IDS = 'git_ids'
+
+OLLAMA_DEFAULT_ENDPOINT = "http://localhost:11434"
+OLLAMA_DEFAULT_MODEL = "gemma4:e4b"

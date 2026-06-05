@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>modelteam profile</title>
+<style>/*__INLINE_CSS__*/</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-row">
+    <img class="logo" alt="modelteam" src="__MT_LOGO_DATA_URI__">
+    <div class="hero-text">
+      <div class="kicker">verified skills profile</div>
+      <h1 class="hero-name" data-mt="user"></h1>
+      <div class="hero-sub">
+        <span data-mt="generated">generated</span>
+        <span class="dot">·</span>
+        <span class="hash" data-mt="hcShort"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="metric-grid">
+    <div class="metric">
+      <div class="metric-num" data-mt="totalSkills">—</div>
+      <div class="metric-label">skills</div>
+    </div>
+    <div class="metric">
+      <div class="metric-num" data-mt="totalRepos">—</div>
+      <div class="metric-label">repos analyzed</div>
+    </div>
+    <div class="metric">
+      <div class="metric-num" data-mt="totalLines">—</div>
+      <div class="metric-label">lines authored</div>
+    </div>
+    <div class="metric">
+      <div class="metric-num" data-mt="span">—</div>
+      <div class="metric-label">active window</div>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<nav class="tabs" role="tablist">
+  <button class="tab active" role="tab" data-tab="skills" aria-selected="true">Skills</button>
+  <button class="tab" role="tab" data-tab="langs" aria-selected="false">Languages</button>
+</nav>
+
+<section class="card tab-panel" role="tabpanel" data-panel="skills">
+  <div class="card-head">
+    <h2>Skills</h2>
+    <div class="card-sub">grouped by domain · lines authored per quarter</div>
+  </div>
+  <div class="chips" id="skill-chips"></div>
+  <div class="empty" id="skills-empty" hidden>No skills extracted yet.</div>
+  <div id="skill-group-charts"></div>
+</section>
+
+<section class="card tab-panel" role="tabpanel" data-panel="langs" hidden>
+  <div class="card-head">
+    <h2>Languages</h2>
+    <div class="card-sub">lines of code per quarter · click a chip to see its timeline</div>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="chart-langs"></canvas>
+  </div>
+  <div class="chips" id="lang-chips"></div>
+  <div class="empty" id="langs-empty" hidden>No language activity in the past 2 years.</div>
+
+  <hr class="divider">
+
+  <div class="detail-head">
+    <div class="kicker">timeline</div>
+    <h3 class="detail-title">
+      <span id="lang-detail-name">—</span>
+    </h3>
+    <div class="card-sub">lines added per quarter for the selected language</div>
+  </div>
+  <div class="chart-wrap">
+    <canvas id="chart-lang-detail"></canvas>
+  </div>
+  <div class="empty" id="lang-detail-empty" hidden>
+    No quarterly data available for this language.
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="foot-row">
+    <span>generated locally · safe to host publicly</span>
+    <span>no repo names · no file paths · no commit messages</span>
+  </div>
+  <div class="foot-row mono">
+    <span>hc <span data-mt="hcFull"></span></span>
+    <span data-mt="iso"></span>
+  </div>
+</footer>
+
+<script>/*__INLINE_CHARTJS__*/</script>
+<script>window.__MT_DATA__ = "__MT_DATA_JSON__";</script>
+<script>/*__INLINE_APP_JS__*/</script>
+</body>
+</html>

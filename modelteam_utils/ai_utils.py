@@ -1,274 +1,418 @@
-import gzip
-import os
-import pickle
+import json
 
-import numpy as np
-import torch
-import transformers
-from huggingface_hub import try_to_load_from_cache
-from peft import PeftConfig, PeftModel
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM
+import requests
 
-from .constants import SKILL_PREDICTION_LIMIT, LIFE_OF_PY_BUCKETS, C2S, LIFE_OF_PY, I2S, MLC, MT_START, MT_END, \
-    LIFE_OF_PY_BUCKET_SIZE
-from .utils import load_file_to_list, convert_list_to_index, load_skill_config
+from .constants import OLLAMA_DEFAULT_ENDPOINT, OLLAMA_DEFAULT_MODEL, SKILL_PREDICTION_LIMIT, CHUNK_CHAR_LIMIT
 
+SYSTEM_PROMPT = (
+    "You are a code skill extractor. Given code snippets with file metadata, identify the "
+    "specific technical skills demonstrated.\n\n"
+    "RULES:\n"
+    "1. Return specific, named technologies: frameworks, libraries, platforms, tools, "
+    "protocols, concrete engineering disciplines.\n"
+    "   GOOD: \"React\", \"FastAPI\", \"Docker\", \"PostgreSQL\", \"pandas\", \"PyTorch\", "
+    "\"Hugging Face Transformers\", \"LangChain\", \"RAG\", \"LoRA\", \"ONNX\", \"vLLM\", "
+    "\"Vector Database\", \"Prompt Engineering\", \"Function Calling\", \"GraphQL\", "
+    "\"WebSocket\", \"Kubernetes\", \"Terraform\", \"Redis\", \"Celery\", \"OAuth\"\n"
+    "   BAD: \"Error Handling\", \"Data Processing\", \"Web Development\", \"API Design\", "
+    "\"Object-Oriented Programming\", \"Code Quality\", \"Asynchronous Programming\", "
+    "\"String Manipulation\", \"Logging\"\n\n"
+    "2. Map imports and usage patterns to the framework/library/technique name:\n"
+    "   - \"from transformers import ...\" -> \"Hugging Face Transformers\"\n"
+    "   - \"from peft import LoraConfig\" -> \"LoRA\", \"PEFT\"\n"
+    "   - \"from langchain import ...\" -> \"LangChain\"\n"
+    "   - \"import chromadb\" -> \"ChromaDB\"\n"
+    "   - \"from openai import OpenAI\" -> \"OpenAI API\"\n"
+    "   - \"import torch\", \"nn.Module\" -> \"PyTorch\"\n"
+    "   - \"from diffusers import ...\" -> \"Diffusers\"\n"
+    "   - \"import pandas\", \"pd.DataFrame\" -> \"pandas\"\n"
+    "   - \"useEffect\", \"useState\" -> \"React\"\n"
+    "   - \"app = FastAPI()\" -> \"FastAPI\"\n\n"
+    "3. Recognize AI/ML patterns and name them specifically:\n"
+    "   - Fine-tuning with adapters (QLoRA, LoRA, PEFT) -> \"Fine-Tuning\", \"LoRA\", \"PEFT\"\n"
+    "   - Retrieval-augmented generation -> \"RAG\"\n"
+    "   - Embedding generation + vector search -> \"Vector Database\", \"Embeddings\"\n"
+    "   - Tool/function calling with LLMs -> \"Function Calling\"\n"
+    "   - Prompt templates, chat completions -> \"Prompt Engineering\"\n"
+    "   - Model quantization (GPTQ, AWQ, bitsandbytes) -> \"Model Quantization\"\n"
+    "   - Model serving (vLLM, TGI, Triton) -> name the specific server\n"
+    "   - Agents, planning, multi-step reasoning -> \"AI Agents\"\n\n"
+    "4. Do NOT return the programming language itself as a skill.\n"
+    "5. Use standard capitalization (e.g., \"FastAPI\" not \"fastapi\", \"NumPy\" not \"numpy\", "
+    "\"PyTorch\" not \"pytorch\", \"LangChain\" not \"langchain\").\n"
+    "6. Return at most {limit} skills.\n"
+    "7. Return ONLY JSON: {{\"skills\": [\"Skill1\", \"Skill2\"]}}"
+)
 
-def get_multi_label_classification_scores(arr, index, names):
-    output = []
-    scores = []
-    score_map = {}
-    for i in range(len(arr)):
-        if arr[i][index][1] > 0:
-            score_map[names[i]] = arr[i][index][1]
-    count = 0
-    for k in sorted(score_map, key=score_map.get, reverse=True):
-        output.append(k)
-        scores.append(float(score_map[k]))
-        count += 1
-        if count == SKILL_PREDICTION_LIMIT:
-            break
-    return output, scores
-
-
-def softmax(x):
-    exp_x = np.exp(x)
-    return exp_x / np.sum(exp_x, axis=0).tolist()
-
-
-def eval_llm_batch_with_scores_old(tokenizer, device, model, codes, new_tokens, limit=SKILL_PREDICTION_LIMIT):
-    skill_list = []
-    next_best_prob_list = []
-    soft_max_list = []
-    for code in codes:
-        with torch.no_grad():
-            input_tokens = tokenizer(code, return_tensors="pt", padding=True, truncation=True, max_length=400).to(
-                device)
-            output = model.generate(**input_tokens, max_new_tokens=2, return_dict_in_generate=True, output_scores=True,
-                                    no_repeat_ngram_size=3, do_sample=False, renormalize_logits=True)
-            score_map = {}
-            soft_max_map = {}
-            new_token_scores = []
-            words = []
-            for i in new_tokens:
-                word = tokenizer.decode(i)
-                score_map[word] = output.scores[1][0][i].item()
-                new_token_scores.append(score_map[word])
-                words.append(word)
-            soft_max_scores = softmax(new_token_scores)
-            for w, s in zip(words, soft_max_scores):
-                soft_max_map[w] = s
-            tmp_results = []
-            tmp_scores = []
-            tmp_orig_scores = []
-            top_n = sorted(score_map, key=score_map.get, reverse=True)[:limit]
-            next_best_pr = next_best_prob(soft_max_map, top_n)
-            for word in top_n:
-                tmp_results.append(word)
-                tmp_scores.append(next_best_pr[word])
-                tmp_orig_scores.append(soft_max_map[word])
-            skill_list.append(tmp_results)
-            next_best_prob_list.append(tmp_scores)
-            soft_max_list.append(tmp_orig_scores)
-    return skill_list, next_best_prob_list, soft_max_list
-
-
-def eval_llm_batch_with_scores(tokenizer, device, model, codes, new_tokens, limit=SKILL_PREDICTION_LIMIT,
-                               is_qwen=False):
-    if is_qwen:
-        new_codes = []
-        for prompt in codes:
-            messages = [
-                {"role": "system", "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."},
-                {"role": "user", "content": f"{MT_START}{prompt}{MT_END}"}
-            ]
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
-            )
-            new_codes.append(text)
-        codes = new_codes
-    skill_list = []
-    next_best_prob_list = []
-    soft_max_list = []
-    max_new_tokens = 2
-    score_index = 1
-    with torch.no_grad():
-        if is_qwen:
-            input_tokens = tokenizer(codes, return_tensors="pt", padding=True, truncation=True).to(device)
-            max_new_tokens = 1
-            score_index = 0
-        else:
-            input_tokens = tokenizer(codes, return_tensors="pt", padding=True, truncation=True, max_length=400).to(
-                device)
-        output = model.generate(**input_tokens, max_new_tokens=max_new_tokens, return_dict_in_generate=True,
-                                output_scores=True, no_repeat_ngram_size=3, do_sample=False, renormalize_logits=True)
-    for i in range(len(codes)):
-        score_map = {}
-        soft_max_map = {}
-        new_token_scores = []
-        words = []
-        for j in new_tokens:
-            word = tokenizer.decode(j)
-            score_map[word] = output.scores[score_index][i][j].item()
-            new_token_scores.append(score_map[word])
-            words.append(word)
-        soft_max_scores = softmax(new_token_scores)
-        for w, s in zip(words, soft_max_scores):
-            soft_max_map[w] = s
-        tmp_results = []
-        tmp_scores = []
-        tmp_orig_scores = []
-        top_n = sorted(score_map, key=score_map.get, reverse=True)[:limit]
-        next_best_pr = next_best_prob(soft_max_map, top_n)
-        for word in top_n:
-            tmp_results.append(word)
-            tmp_scores.append(next_best_pr[word])
-            tmp_orig_scores.append(soft_max_map[word])
-        skill_list.append(tmp_results)
-        next_best_prob_list.append(tmp_scores)
-        soft_max_list.append(tmp_orig_scores)
-    return skill_list, next_best_prob_list, soft_max_list
+FEW_SHOT_EXAMPLES = [
+    {
+        "user": (
+            "Language: Python\nFile: train_lora.py\n"
+            "Imports: transformers, peft, torch, datasets, bitsandbytes, trl\n\n"
+            "Code:\n```\n"
+            "model = AutoModelForCausalLM.from_pretrained(\n"
+            "    base_model, quantization_config=BitsAndBytesConfig(load_in_4bit=True),\n"
+            "    device_map=\"auto\"\n"
+            ")\n"
+            "lora_config = LoraConfig(r=16, lora_alpha=32, target_modules=[\"q_proj\", \"v_proj\"])\n"
+            "model = get_peft_model(model, lora_config)\n"
+            "trainer = SFTTrainer(\n"
+            "    model=model, train_dataset=dataset,\n"
+            "    tokenizer=tokenizer, args=training_args\n"
+            ")\n"
+            "trainer.train()\n"
+            "model.push_to_hub(\"my-org/fine-tuned-model\")\n"
+            "```"
+        ),
+        "assistant": '{"skills": ["Hugging Face Transformers", "LoRA", "PEFT", "QLoRA", "PyTorch", "Fine-Tuning", "Hugging Face Hub"]}'
+    },
+    {
+        "user": (
+            "Language: Python\nFile: rag_pipeline.py\n"
+            "Imports: langchain, chromadb, openai, tiktoken\n\n"
+            "Code:\n```\n"
+            "embeddings = OpenAIEmbeddings(model=\"text-embedding-3-small\")\n"
+            "vectorstore = Chroma.from_documents(chunks, embeddings, persist_directory=\"./db\")\n"
+            "retriever = vectorstore.as_retriever(search_kwargs={\"k\": 5})\n"
+            "llm = ChatOpenAI(model=\"gpt-4\", temperature=0)\n"
+            "chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever)\n"
+            "response = chain.invoke({\"query\": user_question})\n"
+            "```"
+        ),
+        "assistant": '{"skills": ["LangChain", "ChromaDB", "OpenAI API", "RAG", "Embeddings", "Vector Database"]}'
+    },
+    {
+        "user": (
+            "Language: TypeScript\nFile: api/routes/users.ts\n"
+            "Imports: express, prisma, zod, jsonwebtoken, bcrypt\n\n"
+            "Code:\n```\n"
+            "const schema = z.object({ email: z.string().email(), password: z.string().min(8) });\n"
+            "router.post('/register', async (req, res) => {\n"
+            "  const { email, password } = schema.parse(req.body);\n"
+            "  const hashed = await bcrypt.hash(password, 12);\n"
+            "  const user = await prisma.user.create({ data: { email, password: hashed } });\n"
+            "  const token = jwt.sign({ sub: user.id }, process.env.JWT_SECRET);\n"
+            "  res.json({ token });\n"
+            "});\n"
+            "```"
+        ),
+        "assistant": '{"skills": ["Express", "Prisma", "Zod", "JWT", "Authentication", "bcrypt"]}'
+    },
+]
 
 
-def smart_tokenizer_and_embedding_resize(
-        new_tokens: [],
-        tokenizer: transformers.PreTrainedTokenizer,
-        model: transformers.PreTrainedModel,
-        modify_embedding: bool = True,
-):
-    """Resize tokenizer and embedding.
-
-    Note: This is the unoptimized version that may make your embedding size not be divisible by 64.
-    """
-    num_new_tokens = tokenizer.add_tokens(new_tokens)
-    model.resize_token_embeddings(len(tokenizer))
-    if num_new_tokens > 0 and modify_embedding:
-        input_embeddings = model.get_input_embeddings().weight.data
-        output_embeddings = model.get_output_embeddings().weight.data
-
-        input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
-        output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
-
-        input_embeddings[-num_new_tokens:] = input_embeddings_avg
-        output_embeddings[-num_new_tokens:] = output_embeddings_avg
-    vocabulary = tokenizer.get_vocab()
-    new_token_ids = set()
-    for word in new_tokens:
-        if word in vocabulary:
-            new_token_ids.add(vocabulary.get(word))
-    return tokenizer, new_token_ids
+def check_ollama_ready(config):
+    endpoint = config.get("ollama", "endpoint", fallback=OLLAMA_DEFAULT_ENDPOINT)
+    model = config.get("ollama", "model", fallback=OLLAMA_DEFAULT_MODEL)
+    try:
+        resp = requests.get(f"{endpoint}/api/tags", timeout=5)
+        if resp.status_code != 200:
+            return False
+        models = resp.json().get("models", [])
+        model_names = [m.get("name", "") for m in models]
+        return any(model in name for name in model_names)
+    except requests.ConnectionError:
+        return False
 
 
-def next_best_prob(word_probabilities, top_words):
-    processed_words = set()
-    next_best_words_probabilities = {}
-    for word in top_words:
-        if not next_best_words_probabilities:
-            # The first word is the best word
-            next_best_words_probabilities[word] = word_probabilities[word]
-        else:
-            total_prob = sum(word_probabilities[w] for w in word_probabilities.keys() if w not in processed_words)
-            next_best_words_probabilities[word] = word_probabilities[word] / total_prob
-        processed_words.add(word)
-    return next_best_words_probabilities
+def init_ollama(config):
+    endpoint = config.get("ollama", "endpoint", fallback=OLLAMA_DEFAULT_ENDPOINT)
+    model = config.get("ollama", "model", fallback=OLLAMA_DEFAULT_MODEL)
+    chunk_char_limit = int(config.get("ollama", "chunk_char_limit", fallback=str(CHUNK_CHAR_LIMIT)))
+    num_predict = int(config.get("ollama", "num_predict", fallback="1024"))
+    system_prompt = SYSTEM_PROMPT.format(limit=SKILL_PREDICTION_LIMIT)
+    return {
+        "endpoint": endpoint,
+        "model": model,
+        "model_tag": f"c2s::{model}",
+        "chunk_char_limit": chunk_char_limit,
+        "num_predict": num_predict,
+        "system_prompt": system_prompt,
+    }
 
 
-def get_tokenizer_with_new_tokens_and_update_model(checkpoint, skills_file, model):
-    is_qwen = "qwen" in checkpoint.lower()
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-    new_words = load_skill_config(skills_file, only_keys=True, return_set=False)
-    if is_qwen:
-        new_words.append(MT_START)
-        new_words.append(MT_END)
-        tokenizer.padding_side = 'left'
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-    # modify embedding only for Qwen models
-    tokenizer, new_token_ids = smart_tokenizer_and_embedding_resize(new_words, tokenizer, model,
-                                                                    modify_embedding=is_qwen)
-    return tokenizer, new_token_ids
+def extract_skills_from_snippet(model_data, code_snippet, file_name="", lang="", imports=None):
+    url = f"{model_data['endpoint']}/api/chat"
 
+    context_parts = []
+    if lang:
+        context_parts.append(f"Language: {lang}")
+    if file_name:
+        context_parts.append(f"File: {file_name}")
+    if imports:
+        context_parts.append(f"Imports: {', '.join(imports[:30])}")
 
-def get_life_of_py_tokenizer_with_new_tokens_and_update_model(checkpoint, model):
-    is_qwen = "qwen" in checkpoint.lower()
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-    if is_qwen:
-        new_tokens = LIFE_OF_PY_BUCKETS.copy()
-        new_tokens.append(MT_START)
-        new_tokens.append(MT_END)
-        tokenizer.padding_side = 'left'
-        tokenizer.pad_token_id = tokenizer.eos_token_id
+    context_header = "\n".join(context_parts)
+    if context_header:
+        user_content = f"{context_header}\n\nCode:\n```\n{code_snippet}\n```"
     else:
-        new_tokens = LIFE_OF_PY_BUCKETS
-    tokenizer, new_token_ids = smart_tokenizer_and_embedding_resize(new_tokens, tokenizer, model,
-                                                                    modify_embedding=is_qwen)
-    return tokenizer, new_token_ids
+        user_content = f"Code:\n```\n{code_snippet}\n```"
 
+    messages = [{"role": "system", "content": model_data["system_prompt"]}]
+    for ex in FEW_SHOT_EXAMPLES:
+        messages.append({"role": "user", "content": ex["user"]})
+        messages.append({"role": "assistant", "content": ex["assistant"]})
+    messages.append({"role": "user", "content": user_content})
 
-def get_life_of_py_bucket(change):
-    bkt_id = min(change // LIFE_OF_PY_BUCKET_SIZE, len(LIFE_OF_PY_BUCKETS) - 1)
-    return LIFE_OF_PY_BUCKETS[bkt_id]
-
-
-def get_model_list(config, config_key):
-    model_list = []
-    if config_key not in config:
-        return model_list
-    mc = config[config_key]
-    model_list.append(mc["path"])
-    if "alpha.path" in mc:
-        model_list.append(mc["alpha.path"])
-    if "beta.path" in mc:
-        model_list.append(mc["beta.path"])
-    return model_list
-
-
-def get_hf_cache_path_if_present(model_name):
-    if os.path.isdir(model_name):
-        return model_name
-    file_list = ['adapter_model.safetensors', 'pytorch_model.bin', 'model.safetensors']
-    for file in file_list:
-        filepath = try_to_load_from_cache(model_name, file)
-        if isinstance(filepath, str):
-            return filepath.replace(file, '')
-    return model_name
-
-
-def init_model(model_path, model_type, config, device):
-    model_data = {"model_type": model_type, "model_tag": f"{model_type}::{model_path}"}
-    if model_type == C2S or model_type == LIFE_OF_PY or model_type == I2S:
-        model_path = get_hf_cache_path_if_present(model_path)
-        skill_list = config["modelteam.ai"]["skill_list"]
-        peft_config = PeftConfig.from_pretrained(model_path)
-        base_model_path = get_hf_cache_path_if_present(peft_config.base_model_name_or_path)
-        base_llm = get_hf_cache_path_if_present(base_model_path)
-        is_qwen = 'qwen' in model_path.lower() or 'qwen' in base_model_path.lower()
-        if is_qwen:
-            model = AutoModelForCausalLM.from_pretrained(base_model_path, torch_dtype=torch.bfloat16).to(device)
+    payload = {
+        "model": model_data["model"],
+        "messages": messages,
+        "stream": False,
+        "format": "json",
+        "think": False,
+        "options": {
+            "temperature": 0.1,
+            "num_predict": model_data.get("num_predict", 1024)
+        }
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=120)
+        resp.raise_for_status()
+        content = resp.json()["message"]["content"]
+        parsed = json.loads(content)
+        if isinstance(parsed, dict) and "skills" in parsed:
+            raw_skills = parsed["skills"]
+        elif isinstance(parsed, list):
+            raw_skills = parsed
         else:
-            model = AutoModelForSeq2SeqLM.from_pretrained(base_model_path).to(device)
-        if model_type == LIFE_OF_PY:
-            tokenizer, new_tokens = get_life_of_py_tokenizer_with_new_tokens_and_update_model(base_llm, model)
-        else:
-            tokenizer, new_tokens = get_tokenizer_with_new_tokens_and_update_model(base_llm, skill_list, model)
-        model = PeftModel.from_pretrained(model, model_path).to(device)
-        if is_qwen:
-            model.generation_config.pad_token_id = tokenizer.pad_token_id
-        model.eval()
-        model_data["model"] = model
-        model_data["tokenizer"] = tokenizer
-        model_data["new_tokens"] = new_tokens
-    elif model_type == MLC:
-        with gzip.open(os.path.join(model_path, "model.pkl.gz"), "rb") as f:
-            model = pickle.load(f)
-            model_data["model"] = model
-            model.eval()
-        libs = load_file_to_list(os.path.join(model_path, "lib_list.txt.gz"))
-        lib_index, lib_names = convert_list_to_index(libs, do_sort=False)
-        model_data["lib_index"] = lib_index
-        skills = load_file_to_list(os.path.join(model_path, "skill_list.txt.gz"))
-        skill_index, skill_names = convert_list_to_index(skills, do_sort=False)
-        model_data["skill_names"] = skill_names
-    return model_data
-    pass
+            return []
+        return normalize_skill_names(raw_skills)[:SKILL_PREDICTION_LIMIT]
+    except Exception as e:
+        print(f"Ollama inference error: {e}", flush=True)
+        return []
+
+
+REFACTOR_CHECK_PROMPT = (
+    "You classify code changes. Given a description of a large code change, "
+    "determine if it is primarily:\n"
+    "- REFACTOR: code reformatting, style/lint fixes, auto-formatter output, "
+    "whitespace cleanup, renaming, moving code between files, import reordering, "
+    "generated/vendored file updates\n"
+    "- CONTRIBUTION: new features, bug fixes, new APIs, significant logic changes, "
+    "new tests, new modules, meaningful refactors that change architecture\n\n"
+    "Return ONLY JSON: {\"classification\": \"REFACTOR\" or \"CONTRIBUTION\"}"
+)
+
+
+def check_if_refactor(model_data, description):
+    """Ask the LLM whether a large code change is a refactor.
+
+    Returns True if the change appears to be a refactor/reformatting.
+    Defaults to False (not a refactor) on error — err on the side of processing.
+    """
+    url = f"{model_data['endpoint']}/api/chat"
+    payload = {
+        "model": model_data["model"],
+        "messages": [
+            {"role": "system", "content": REFACTOR_CHECK_PROMPT},
+            {"role": "user", "content": description},
+        ],
+        "stream": False,
+        "format": "json",
+        "think": False,
+        "options": {"temperature": 0.0, "num_predict": 64},
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=60)
+        resp.raise_for_status()
+        content = resp.json()["message"]["content"]
+        parsed = json.loads(content)
+        classification = parsed.get("classification", "").upper()
+        return classification == "REFACTOR"
+    except Exception:
+        return False
+
+
+def normalize_skill_names(raw_skills):
+    normalized = []
+    seen = set()
+    for skill in raw_skills:
+        if not isinstance(skill, str) or not skill.strip():
+            continue
+        s = skill.strip()
+        key = s.lower()
+        if key not in seen:
+            normalized.append(s)
+            seen.add(key)
+    return normalized
+
+
+_KEYWORD_CATEGORIES = [
+    ("AI / ML", ["pytorch", "tensorflow", "keras", "scikit-learn", "numpy", "pandas",
+                 "feature engineering", "time series", "lightgbm", "xgboost", "catboost",
+                 "neural network", "deep learning", "machine learning", "computer vision",
+                 "hugging face", "transformers", "fine-tuning", "lora", "peft",
+                 "model quantization", "onnx", "diffusers", "reinforcement learning",
+                 "model evaluation", "model training", "hyperparameter",
+                 "scipy", "matplotlib", "seaborn", "data visualization",
+                 "regression", "classification", "clustering", "video processing",
+                 "image processing", "opencv", "networkx", "graph analysis",
+                 "graph construction"]),
+    ("GenAI", ["prompt engineering", "langchain", "llamaindex", "rag",
+               "vector database", "embeddings", "openai api", "ai agents",
+               "function calling", "chromadb", "weaviate", "pinecone", "milvus",
+               "ollama", "vllm", "text generation", "llm", "chatbot",
+               "gemini api", "claude api"]),
+    ("Frontend", ["react", "angular", "vue", "svelte", "next.js", "nuxt",
+                  "html", "css", "sass", "tailwind", "bootstrap", "webpack",
+                  "vite", "redux", "zustand", "material ui", "chakra",
+                  "framer motion", "three.js", "d3.js", "chart.js",
+                  "web scraping"]),
+    ("Backend", ["rest api", "graphql", "express", "fastapi", "flask", "django",
+                 "spring", "node.js", "websocket", "grpc", "api integration",
+                 "authentication", "jwt", "oauth", "celery", "rabbitmq",
+                 "kafka", "microservices", "nginx", "api gateway",
+                 "pydantic", "middleware", "batch processing"]),
+    ("Databases", ["sqlite", "postgresql", "mysql", "mongodb", "redis",
+                   "sqlalchemy", "orm", "prisma", "dynamodb", "cassandra",
+                   "elasticsearch", "neo4j", "firestore", "supabase",
+                   "data modeling"]),
+    ("DevOps / Cloud", ["docker", "kubernetes", "terraform", "ansible", "jenkins",
+                        "github actions", "ci/cd", "aws", "azure", "gcp",
+                        "google cloud", "cloudformation", "helm", "prometheus",
+                        "grafana", "linux", "monitoring", "pytest"]),
+    ("Data", ["spark", "airflow", "dbt", "snowflake", "bigquery",
+              "data pipeline", "etl", "data warehouse", "hadoop",
+              "databricks", "redshift", "tableau", "power bi",
+              "data engineering", "streaming", "backtesting"]),
+    ("Mobile", ["react native", "flutter", "swift", "swiftui", "kotlin",
+                "android", "ios", "expo", "capacitor"]),
+    ("APIs", ["alpaca api", "youtube api", "stripe api", "twilio",
+              "slack api", "twitter api", "github api", "spotify api"]),
+]
+
+
+def group_skills_by_keyword(skill_names):
+    """Group skills into categories using keyword matching (no LLM needed)."""
+    if not skill_names:
+        return []
+
+    groups = {}
+    for skill in skill_names:
+        skill_lower = skill.lower()
+        matched = False
+        for cat_name, keywords in _KEYWORD_CATEGORIES:
+            for kw in keywords:
+                if len(kw) <= 3 or len(skill_lower) <= 3:
+                    hit = (kw == skill_lower)
+                else:
+                    hit = (kw in skill_lower or skill_lower in kw)
+                if hit:
+                    groups.setdefault(cat_name, []).append(skill)
+                    matched = True
+                    break
+            if matched:
+                break
+        if not matched:
+            groups.setdefault("Other", []).append(skill)
+
+    cat_order = [c[0] for c in _KEYWORD_CATEGORIES] + ["Other"]
+    result = []
+    for cat in cat_order:
+        if cat in groups:
+            result.append({"name": cat, "skills": groups[cat]})
+    return result
+
+
+GROUP_SKILLS_PROMPT = (
+    "Group these technical skills into 3-5 categories for a developer profile chart.\n\n"
+    "Use short domain-based category names like:\n"
+    "  \"AI / ML\", \"Frontend\", \"Backend\", \"Data\", \"DevOps\", \"Databases\", \"Cloud\"\n\n"
+    "RULES:\n"
+    "1. Each group should have 1-5 skills. Merge tiny groups into the nearest fit.\n"
+    "2. Every input skill must appear in exactly one group.\n"
+    "3. Order groups by total importance (most important group first).\n"
+    "4. Return ONLY JSON: {\"groups\": [{\"name\": \"Category\", \"skills\": [\"Skill1\"]}, ...]}"
+)
+
+
+def group_skills_for_report(model_data, skills):
+    """Group skills into categories for charting. Returns list of {name, skills} dicts."""
+    if not skills:
+        return []
+    url = f"{model_data['endpoint']}/api/chat"
+    payload = {
+        "model": model_data["model"],
+        "messages": [
+            {"role": "system", "content": GROUP_SKILLS_PROMPT},
+            {"role": "user", "content": f"Group these skills:\n{json.dumps(skills)}"},
+        ],
+        "stream": False,
+        "format": "json",
+        "think": False,
+        "options": {"temperature": 0.0, "num_predict": 1024},
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=60)
+        resp.raise_for_status()
+        parsed = json.loads(resp.json()["message"]["content"])
+        groups = parsed.get("groups", [])
+        if isinstance(groups, list) and groups:
+            valid = []
+            for g in groups:
+                if isinstance(g, dict) and g.get("name") and g.get("skills"):
+                    valid.append({"name": g["name"], "skills": list(g["skills"])})
+            if valid:
+                return valid
+    except Exception as e:
+        print(f"  Skill grouping error: {e}", flush=True)
+    return [{"name": "Skills", "skills": skills}]
+
+
+PROFILE_RANK_PROMPT = (
+    "You curate a software engineer's public profile. Given their programming languages "
+    "and extracted skill list, decide which skills should appear on the profile.\n\n"
+    "GUIDELINES:\n"
+    "1. RELEVANT: specific, distinctive skills that showcase real expertise — named "
+    "frameworks, libraries, platforms, tools, concrete disciplines. A skill mentioned "
+    "rarely can still be highly relevant (e.g. Kubernetes from a few config files).\n"
+    "2. NOT RELEVANT: skills that are too generic, too expected given their stack, "
+    "redundant with another skill already marked relevant, or add noise.\n"
+    "3. Aim for 15-30 relevant skills. Fewer is better than padding with filler.\n"
+    "4. Consider the developer's apparent specialization from their language mix.\n"
+    "5. Frequency scores are provided but should NOT dominate — a low-frequency skill "
+    "can be more profile-worthy than a high-frequency generic one.\n\n"
+    "Return ONLY JSON: {\"relevant\": [\"Skill1\", \"Skill2\", ...], "
+    "\"not_relevant\": [\"Skill3\", \"Skill4\", ...]}\n"
+    "Every input skill must appear in exactly one list."
+)
+
+
+def rank_skills_for_profile(model_data, skills_with_scores, languages):
+    """Ask the LLM which skills should default to RELEVANT on the profile.
+
+    Returns a set of skill names deemed relevant.
+    Falls back to all-relevant on error.
+    """
+    url = f"{model_data['endpoint']}/api/chat"
+
+    skill_entries = [f"{s} (score: {v:.1f})" for s, v in
+                     sorted(skills_with_scores.items(), key=lambda x: -x[1])]
+    user_content = (
+        f"Languages: {', '.join(sorted(languages))}\n\n"
+        f"Skills:\n{json.dumps(skill_entries)}"
+    )
+
+    payload = {
+        "model": model_data["model"],
+        "messages": [
+            {"role": "system", "content": PROFILE_RANK_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        "stream": False,
+        "format": "json",
+        "think": False,
+        "options": {"temperature": 0.0, "num_predict": 2048},
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=120)
+        resp.raise_for_status()
+        content = resp.json()["message"]["content"]
+        parsed = json.loads(content)
+        relevant = parsed.get("relevant", [])
+        if isinstance(relevant, list) and relevant:
+            return set(relevant)
+        return set(skills_with_scores.keys())
+    except Exception as e:
+        print(f"  Profile ranking error: {e}", flush=True)
+        return set(skills_with_scores.keys())
